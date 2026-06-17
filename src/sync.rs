@@ -100,23 +100,49 @@ pub fn process_systems_dump(filename: &str) {
     let (sender, receiver) = bounded(10);
     let writer_thread = std::thread::spawn(move || db_writer_worker(receiver));
 
-    let stream = serde_json::Deserializer::from_reader(reader).into_iter::<SpanshSystem>();
-    let mut batch = Vec::with_capacity(5000);
-    let mut count = 0;
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
 
-    for item in stream {
-        if let Ok(sys) = item {
-            batch.push(sys);
-            count += 1;
-            if batch.len() >= 5000 {
-                sender.send(std::mem::take(&mut batch)).unwrap();
-                print!("\rImported {} systems...", count);
-                std::io::stdout().flush().unwrap();
+    struct SpanshVisitor {
+        sender: crossbeam_channel::Sender<Vec<SpanshSystem>>,
+        batch: Vec<SpanshSystem>,
+        count: usize,
+    }
+
+    impl<'de> serde::de::Visitor<'de> for SpanshVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a JSON array of Spansh systems")
+        }
+
+        fn visit_seq<A>(mut self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            while let Ok(Some(sys)) = seq.next_element::<SpanshSystem>() {
+                self.batch.push(sys);
+                self.count += 1;
+                if self.batch.len() >= 5000 {
+                    self.sender.send(std::mem::take(&mut self.batch)).unwrap();
+                    print!("\rImported {} systems...", self.count);
+                    std::io::stdout().flush().unwrap();
+                }
             }
+            if !self.batch.is_empty() {
+                self.sender.send(self.batch).unwrap();
+            }
+            Ok(self.count)
         }
     }
 
-    if !batch.is_empty() { sender.send(batch).unwrap(); }
+    let count = serde::Deserializer::deserialize_seq(
+        &mut deserializer,
+        SpanshVisitor {
+            sender: sender.clone(),
+            batch: Vec::with_capacity(5000),
+            count: 0,
+        },
+    ).unwrap_or(0);
     drop(sender);
     writer_thread.join().unwrap();
 
@@ -194,7 +220,11 @@ pub async fn sync_manager() {
             info!("Starting Spansh galaxy sync...");
             let t_start = Instant::now();
 
-            if download_file(URL_SYSTEMS_1DAY, FILE_SYSTEMS_1DAY) {
+            let dl_success = tokio::task::spawn_blocking(|| {
+                download_file(URL_SYSTEMS_1DAY, FILE_SYSTEMS_1DAY)
+            }).await.unwrap();
+
+            if dl_success {
                 tokio::task::spawn_blocking(|| {
                     process_systems_dump(FILE_SYSTEMS_1DAY);
                     if let Err(e) = fs::remove_file(FILE_SYSTEMS_1DAY) {
