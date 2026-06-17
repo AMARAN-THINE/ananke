@@ -88,6 +88,14 @@ pub struct RouteQuery {
 }
 
 #[derive(Deserialize)]
+pub struct DistanceQuery {
+    #[serde(rename = "systemA", alias = "system_a", alias = "from")]
+    pub system_a: String,
+    #[serde(rename = "systemB", alias = "system_b", alias = "to")]
+    pub system_b: String,
+}
+
+#[derive(Deserialize)]
 pub struct NearestStationQuery {
     #[serde(rename = "refSystem", alias = "ref_system", alias = "system")]
     pub ref_system: String,

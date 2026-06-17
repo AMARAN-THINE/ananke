@@ -128,6 +128,7 @@ async fn main() {
         .route("/api/bodies", get(handlers::system::get_system_bodies))
         .route("/api/system/stations", get(handlers::system::get_system_stations))
         .route("/api/stations", get(handlers::system::get_system_stations))
+        .route("/api/distance", get(handlers::system::get_distance))
         // Station search
         .route("/api/nearest-station", get(handlers::station::nearest_station))
         // Cube search

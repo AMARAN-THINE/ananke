@@ -2,7 +2,7 @@ use axum::{extract::{Query, State}, http::StatusCode, Json};
 use rusqlite::params;
 use std::sync::Arc;
 
-use crate::models::SystemQuery;
+use crate::models::{SystemQuery, DistanceQuery};
 use crate::state::AppState;
 
 pub async fn get_system(
@@ -248,4 +248,58 @@ pub async fn get_system_stations(
     }).await.unwrap().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(result))
+}
+
+pub async fn get_distance(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DistanceQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _permit = state.query_semaphore.acquire().await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
+
+    let name_a = params.system_a;
+    let name_b = params.system_b;
+    let pool = state.db_pool.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = pool.get().map_err(|e| e.to_string())?;
+
+        let lookup = |name: &str| -> Result<(i64, String, f64, f64, f64), String> {
+            conn.query_row(
+                "SELECT s.id64, s.name, i.minX, i.minY, i.minZ
+                 FROM systems s JOIN systems_index i ON s.id64 = i.id
+                 WHERE s.name = ? COLLATE NOCASE LIMIT 1",
+                rusqlite::params![name],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                )),
+            )
+            .map_err(|_| format!("System not found: {}", name))
+        };
+
+        let (id_a, resolved_a, ax, ay, az) = lookup(&name_a)?;
+        let (id_b, resolved_b, bx, by, bz) = lookup(&name_b)?;
+
+        let dx = bx - ax;
+        let dy = by - ay;
+        let dz = bz - az;
+        let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        Ok(serde_json::json!({
+            "systemA": { "id64": id_a, "name": resolved_a, "coords": { "x": ax, "y": ay, "z": az } },
+            "systemB": { "id64": id_b, "name": resolved_b, "coords": { "x": bx, "y": by, "z": bz } },
+            "distanceLy": (distance * 100.0).round() / 100.0
+        }))
+    })
+    .await
+    .unwrap();
+
+    match result {
+        Ok(json) => Ok(Json(json)),
+        Err(e) => Err((StatusCode::NOT_FOUND, e)),
+    }
 }
