@@ -71,6 +71,10 @@ cargo run --release
   - **Query Parameters**: Same as `/api/system`.
 - `GET /api/system/stations` or `GET /api/stations` - List all stations and fleet carriers in a system.
   - **Query Parameters**: Same as `/api/system`.
+- `GET /api/distance` - Get the 3D Euclidean distance between two star systems.
+  - **Query Parameters**:
+    - `systemA` / `system_a` / `from` *(string, required)*: Starting system name.
+    - `systemB` / `system_b` / `to` *(string, required)*: Destination system name.
 
 ### 2. Search Endpoints
 - `GET /api/nearest-station` - Find the closest station to a reference coordinates or system.
