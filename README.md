@@ -7,7 +7,7 @@ Ananke is a high-performance, concurrent Rust-based backend API for the Galtea p
 ## Features
 
 - **Blazing Fast API**: Built with `axum` and `tokio` for handling a massive number of concurrent requests.
-- **Advanced A* Pathfinding**: Supports Fleet Carrier, Neutron Star, and standard Ship routing. Standard and Fleet Carrier routing feature a **Vulkan-accelerated A*** implementation (`vulkano`) for massive performance gains, with a seamless CPU fallback. Neutron routing currently runs CPU-only via an on-demand spatial-grid A*; a Vulkan kernel exists for it but is disabled pending verification of exact hop-count parity.
+- **Advanced A* Pathfinding**: Supports Fleet Carrier, Neutron Star, and standard Ship routing. Fleet Carrier routing features a **Vulkan-accelerated A*** implementation (`vulkano`) for massive performance gains, with a seamless CPU fallback. Standard ship routing runs CPU-only over a SQLite spatial index. Neutron routing also runs CPU-only via an on-demand spatial-grid A*; a Vulkan kernel exists for it but is disabled pending verification of exact hop-count parity.
 - **Live Data Ingestion**:
   - **EDDN Listener**: Automatically connects to the Elite Dangerous Data Network (EDDN) via ZeroMQ to ingest real-time universe state changes.
   - **EDMC Ingest**: Provides authenticated endpoints for custom Elite Dangerous Market Connector (EDMC) plugins to push journal updates and batch data.
@@ -134,5 +134,5 @@ Ananke utilizes a highly concurrent, thread-safe architecture:
 1. **Async Web Server**: Powered by `axum` routing request endpoints on tokio runtime threads.
 2. **Database Access & Throttling**: Managed through an `r2d2` pool of SQLite connections. Database queries are regulated using `tokio::sync::Semaphore` to prevent SQLite connection exhaustion and database locks.
 3. **Non-Blocking Write Worker**: Live data from the EDMC endpoints and the ZeroMQ EDDN listener thread is sent via `crossbeam-channel` queues to a single dedicated database writer thread. This isolates writes, preventing SQLite database locks from blocking the main web server.
-4. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. Standard ship and Fleet Carrier route requests build Vulkan buffers and execute on the GPU, returning the optimal node path, with seamless CPU A* fallbacks if initialization fails or compute resources are busy. Neutron routing is currently CPU-only (on-demand spatial-grid A*, see Routing section).
+4. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. Fleet Carrier route requests build Vulkan buffers and execute on the GPU, returning the optimal node path, with a seamless CPU A* fallback if initialization fails, compute resources are busy, or the GPU result doesn't improve on the greedy baseline. Standard ship routing and neutron routing are both CPU-only (see Routing section).
 
