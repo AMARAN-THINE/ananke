@@ -44,8 +44,8 @@ pub fn current_time_secs() -> u64 {
 pub fn setup_db_pool() -> Pool<SqliteConnectionManager> {
     let manager = SqliteConnectionManager::file(DB_FILE).with_init(|c| {
         c.execute_batch("
-            PRAGMA mmap_size = 8589934592;
-            PRAGMA cache_size = -2097152;
+            PRAGMA mmap_size = 268435456;
+            PRAGMA cache_size = -65536;
             PRAGMA temp_store = MEMORY;
             PRAGMA journal_size_limit = 1073741824;
             PRAGMA journal_mode = WAL;
@@ -53,7 +53,11 @@ pub fn setup_db_pool() -> Pool<SqliteConnectionManager> {
             PRAGMA synchronous = NORMAL;
         ")
     });
-    Pool::builder().max_size(15).build(manager).expect("Failed to create DB pool")
+    Pool::builder()
+        .max_size(15)
+        .min_idle(Some(2))
+        .build(manager)
+        .expect("Failed to create DB pool")
 }
 
 // --- Schema init ---
@@ -168,7 +172,12 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                         }
 
                         if let Some(bodies) = &sys.bodies {
-                            for b in bodies {
+                            for b_raw in bodies {
+                                let b: serde_json::Value = match serde_json::from_str(b_raw.get()) {
+                                    Ok(v) => v,
+                                    Err(e) => { warn!("skipping malformed body for system {}: {}", sys.id64, e); continue; }
+                                };
+                                let b = &b;
                                 let surface_temp: Option<i64> = get_i64(b, "surfaceTemperature")
                                     .or_else(|| get_f64(b, "surfaceTemperature").map(|f| f.round() as i64));
                                 let atmo_comp = b.get("atmosphereComposition").filter(|v| !v.is_null()).map(|v| v.to_string());
@@ -212,7 +221,12 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                         }
 
                         if let Some(stations) = &sys.stations {
-                            for st in stations {
+                            for st_raw in stations {
+                                let st: serde_json::Value = match serde_json::from_str(st_raw.get()) {
+                                    Ok(v) => v,
+                                    Err(e) => { warn!("skipping malformed station for system {}: {}", sys.id64, e); continue; }
+                                };
+                                let st = &st;
                                 let svcs = st.get("services").and_then(|s| s.as_array());
                                 let mut has_market = 0; let mut has_shipyard = 0; let mut has_outfitting = 0;
                                 let mut other_svcs = Vec::new();

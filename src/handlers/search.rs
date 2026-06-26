@@ -50,7 +50,7 @@ async fn do_cube_search(
         let mut star_class_subtypes: Vec<&str> = Vec::new();
 
         // -- Terrestrial planets --
-        if eff.contains("earth-like") { target_subtypes.push("Earth-like world"); sys_reqs.push("EXISTS (SELECT 1 FROM bodies b2 WHERE b2.systemId64 = s.id64 AND b2.subType = 'Earth-like world')".to_string()); }
+        if eff.contains("earth-like") { target_subtypes.push("Earth-like world"); target_subtypes.push("Earthlike body"); sys_reqs.push("EXISTS (SELECT 1 FROM bodies b2 WHERE b2.systemId64 = s.id64 AND b2.subType IN ('Earth-like world', 'Earthlike body'))".to_string()); }
         if eff.contains("water world") { target_subtypes.push("Water world"); sys_reqs.push("EXISTS (SELECT 1 FROM bodies b2 WHERE b2.systemId64 = s.id64 AND b2.subType = 'Water world')".to_string()); }
         if eff.contains("ammonia world") { target_subtypes.push("Ammonia world"); sys_reqs.push("EXISTS (SELECT 1 FROM bodies b2 WHERE b2.systemId64 = s.id64 AND b2.subType = 'Ammonia world')".to_string()); }
         if eff.contains("high metal content") { target_subtypes.push("High metal content world"); sys_reqs.push("EXISTS (SELECT 1 FROM bodies b2 WHERE b2.systemId64 = s.id64 AND b2.subType = 'High metal content world')".to_string()); }

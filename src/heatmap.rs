@@ -4,6 +4,7 @@ use axum::{
     http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
+use bytes::Bytes;
 use std::{
     sync::{Arc, atomic::{AtomicU64, Ordering as AtomicOrdering}},
     time::{Duration, Instant},
@@ -18,7 +19,9 @@ pub struct Heatmap {
     /// Holds the last rendered PNG and the time it was rendered.
     /// The lock is held for the entire render to prevent simultaneous renders
     /// under concurrent requests (TOCTOU would let N threads all render at once).
-    cached_png: std::sync::Mutex<Option<(Instant, Arc<Vec<u8>>)>>,
+    /// Arc<Bytes> rather than Arc<Vec<u8>> so get_or_render hands out a handle
+    /// whose clone() is O(1) — the handler can build the Body without copying.
+    cached_png: std::sync::Mutex<Option<(Instant, Arc<Bytes>)>>,
     pub total_bumps: AtomicU64,
 }
 
@@ -54,7 +57,7 @@ impl Heatmap {
         }
     }
 
-    fn render_png(&self) -> Vec<u8> {
+    fn render_png(&self) -> Bytes {
         let snap: Vec<u64> = self.cells.iter()
             .map(|c| c.load(AtomicOrdering::Relaxed))
             .collect();
@@ -85,14 +88,16 @@ impl Heatmap {
             .expect("png header write")
             .write_image_data(&rgba)
             .expect("png image write");
-        out
+        Bytes::from(out)
     }
 
     /// Returns a cached PNG, re-rendering only when the cache has expired.
     ///
     /// The mutex is held across the render to avoid the TOCTOU window where
     /// two threads both see a stale cache entry and both kick off a render.
-    pub fn get_or_render(&self) -> Arc<Vec<u8>> {
+    /// Returns Arc<Bytes>; cloning the Arc is O(1) — callers can build an
+    /// HTTP body without copying the PNG buffer.
+    pub fn get_or_render(&self) -> Arc<Bytes> {
         let mut guard = self.cached_png.lock().unwrap();
         if let Some((t, ref bytes)) = *guard {
             if t.elapsed() < Duration::from_secs(HEATMAP_RENDER_CACHE_SECS) {
@@ -151,7 +156,7 @@ pub async fn heatmap_png_handler(
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "image/png")
             .header(header::CACHE_CONTROL, "public, max-age=30")
-            // Serve directly from the Arc — no clone of the PNG buffer.
+            // Arc<Bytes>::clone() is O(1); Body::from(Bytes) avoids copying the PNG.
             .body(Body::from(bytes.as_ref().clone()))
             .unwrap(),
         Err(e) => Response::builder()

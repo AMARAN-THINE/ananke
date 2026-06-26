@@ -119,13 +119,26 @@ pub fn process_systems_dump(filename: &str) {
         where
             A: serde::de::SeqAccess<'de>,
         {
-            while let Ok(Some(sys)) = seq.next_element::<SpanshSystem>() {
-                self.batch.push(sys);
-                self.count += 1;
-                if self.batch.len() >= 5000 {
-                    self.sender.send(std::mem::take(&mut self.batch)).unwrap();
-                    print!("\rImported {} systems...", self.count);
-                    std::io::stdout().flush().unwrap();
+            loop {
+                match seq.next_element::<SpanshSystem>() {
+                    Ok(Some(sys)) => {
+                        self.batch.push(sys);
+                        self.count += 1;
+                        if self.batch.len() >= 5000 {
+                            self.sender.send(std::mem::take(&mut self.batch)).unwrap();
+                            print!("\rImported {} systems...", self.count);
+                            std::io::stdout().flush().unwrap();
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        // The underlying reader position is undefined once an element
+                        // fails mid-stream, there is no safe way to skip just this one
+                        // and keep going. Surface the failure instead of silently
+                        // truncating the rest of the dump.
+                        error!("Spansh deserialize error at record {}: {} — aborting import", self.count, e);
+                        return Err(e);
+                    }
                 }
             }
             if !self.batch.is_empty() {

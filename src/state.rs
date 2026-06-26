@@ -2,8 +2,9 @@ use crossbeam_channel::Sender;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::sync::{Arc, atomic::AtomicU64};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
+use crate::handlers::neutron_route::NeutronGraph;
 use crate::heatmap::Heatmap;
 use crate::models::SpanshSystem;
 use crate::vulkan_astar::VulkanAstar;
@@ -20,6 +21,10 @@ pub struct AppState {
     pub eddn_stats: Arc<EddnStats>,
     pub heatmap: Arc<Heatmap>,
     pub vulkan_astar: Option<Arc<VulkanAstar>>,
+    /// Resident in-memory CSR neutron graph. None until the background
+    /// build task finishes — handlers must check for None and return 503
+    /// rather than block, so the rest of the API stays up during the build.
+    pub neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>>,
 }
 
 #[allow(dead_code)]

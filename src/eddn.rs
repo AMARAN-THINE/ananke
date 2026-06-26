@@ -315,6 +315,15 @@ fn extract_starpos(msg: &serde_json::Value) -> Option<SpanshCoords> {
         })
 }
 
+// `bodies`/`stations` on SpanshSystem are `Box<RawValue>` so the bulk Spansh
+// import doesn't have to materialize a full Value tree per body/station.
+// The EDDN live path builds these as Value objects field-by-field instead of
+// slicing raw JSON, so it needs to re-serialize once at the boundary.
+fn value_to_raw(v: serde_json::Value) -> Box<serde_json::value::RawValue> {
+    serde_json::value::RawValue::from_string(v.to_string())
+        .expect("serde_json::Value always serializes to valid JSON")
+}
+
 fn eddn_handle_journal(msg: &serde_json::Value) -> Option<SpanshSystem> {
     let event = msg.get("event")?.as_str()?;
     let id64 = msg.get("SystemAddress").and_then(|v| v.as_i64())?;
@@ -327,21 +336,21 @@ fn eddn_handle_journal(msg: &serde_json::Value) -> Option<SpanshSystem> {
             let body = eddn_scan_to_body(msg)?;
             let mut sys = eddn_carrier_system(id64, name);
             sys.coords = extract_starpos(msg);
-            sys.bodies = Some(vec![body]);
+            sys.bodies = Some(vec![value_to_raw(body)]);
             Some(sys)
         }
         "Docked" => {
             let station = eddn_docked_to_station(msg)?;
             let mut sys = eddn_carrier_system(id64, name);
             sys.coords = extract_starpos(msg);
-            sys.stations = Some(vec![station]);
+            sys.stations = Some(vec![value_to_raw(station)]);
             Some(sys)
         }
         "SAASignalsFound" => {
             let body = eddn_signals_to_body(msg)?;
             let mut sys = eddn_carrier_system(id64, name);
             sys.coords = extract_starpos(msg);
-            sys.bodies = Some(vec![body]);
+            sys.bodies = Some(vec![value_to_raw(body)]);
             Some(sys)
         }
         _ => None,
@@ -367,9 +376,15 @@ pub fn eddn_listener_thread(
 ) {
     let mut reconnect_delay_ms = EDDN_RECONNECT_BASE_MS;
 
+    // Create the ZMQ context once and reuse it across all reconnect cycles.
+    // Creating a new context per reconnect spawns a fresh internal I/O thread
+    // pool each time; repeated context churn under network instability can exhaust
+    // file descriptors and stall on zmq_ctx_term(). The context is thread-safe
+    // and is valid to reuse after a socket is dropped.
+    let ctx = zmq::Context::new();
+
     'outer: loop {
         info!("EDDN: connecting to {}...", relay_url);
-        let ctx = zmq::Context::new();
         let sock = match ctx.socket(zmq::SUB) {
             Ok(s) => s,
             Err(e) => {

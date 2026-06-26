@@ -13,15 +13,16 @@ mod vulkan_astar;
 use crossbeam_channel::bounded;
 use std::sync::{Arc, atomic::AtomicU64};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tower_http::cors::CorsLayer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use axum::{routing::{get, post}, Router};
 
 use config::*;
 use db::{setup_db_pool, init_db, db_writer_worker};
 use eddn::eddn_listener_thread;
+use handlers::neutron_route::NeutronGraph;
 use heatmap::{Heatmap, heatmap_decay_thread, heatmap_png_handler, heatmap_html_handler};
 use state::{AppState, CarrierCache, EdmcStats, EddnStats};
 use vulkan_astar::VulkanAstar;
@@ -35,6 +36,42 @@ async fn main() {
     let conn = pool.get().unwrap();
     init_db(&conn).unwrap();
     drop(conn);
+
+    // Resident NeutronGraph — built once at startup, but NOT awaited here.
+    // The build scans 3.5M+ rows and computes a CSR edge list, which can
+    // take well over 10 minutes. Blocking server startup on it means the
+    // entire API (every endpoint, not just neutron-route) is unreachable
+    // for that whole window on every restart. Instead: start as `None`,
+    // bind and serve immediately, and let a background task swap in the
+    // real graph once it's ready. /api/neutron-route checks for None and
+    // returns 503 until then — everything else works right away.
+    let neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>> =
+        Arc::new(RwLock::new(None));
+    {
+        let neutron_graph_for_task = neutron_graph.clone();
+        let pool_for_graph = pool.clone();
+        tokio::spawn(async move {
+            info!("Initializing resident NeutronGraph (background)...");
+            let build_result = tokio::task::spawn_blocking(move || -> Result<NeutronGraph, String> {
+                let conn = pool_for_graph.get().map_err(|e| e.to_string())?;
+                NeutronGraph::build(&conn)
+            }).await;
+
+            match build_result {
+                Ok(Ok(graph)) => {
+                    let mut guard = neutron_graph_for_task.write().await;
+                    *guard = Some(Arc::new(graph));
+                    info!("Resident NeutronGraph ready — /api/neutron-route is now live.");
+                }
+                Ok(Err(e)) => {
+                    error!("Failed to build resident NeutronGraph: {}. /api/neutron-route will keep returning 503.", e);
+                }
+                Err(e) => {
+                    error!("NeutronGraph build task panicked: {}. /api/neutron-route will keep returning 503.", e);
+                }
+            }
+        });
+    }
 
     tokio::spawn(async { sync::sync_manager().await; });
 
@@ -117,6 +154,7 @@ async fn main() {
         eddn_stats,
         heatmap,
         vulkan_astar,
+        neutron_graph,
     });
 
     let cors = CorsLayer::permissive();

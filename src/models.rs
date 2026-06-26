@@ -19,9 +19,9 @@ pub struct SpanshSystem {
     #[serde(default)]
     pub coords: Option<SpanshCoords>,
     #[serde(default)]
-    pub bodies: Option<Vec<serde_json::Value>>,
+    pub bodies: Option<Vec<Box<serde_json::value::RawValue>>>,
     #[serde(default)]
-    pub stations: Option<Vec<serde_json::Value>>,
+    pub stations: Option<Vec<Box<serde_json::value::RawValue>>>,
     #[serde(default)]
     pub allegiance: Option<String>,
     #[serde(default)]
