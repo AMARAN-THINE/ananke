@@ -7,7 +7,7 @@ Ananke is a high-performance, concurrent Rust-based backend API for the Galtea p
 ## Features
 
 - **Blazing Fast API**: Built with `axum` and `tokio` for handling a massive number of concurrent requests.
-- **Advanced A* Pathfinding**: Supports Fleet Carrier, Neutron Star, and standard Ship routing. Features a **Vulkan-accelerated A*** implementation (`vulkano`) for massive performance gains on complex routing, with a seamless CPU fallback.
+- **Advanced A* Pathfinding**: Supports Fleet Carrier, Neutron Star, and standard Ship routing. Standard and Fleet Carrier routing feature a **Vulkan-accelerated A*** implementation (`vulkano`) for massive performance gains, with a seamless CPU fallback. Neutron routing currently runs CPU-only via an on-demand spatial-grid A*; a Vulkan kernel exists for it but is disabled pending verification of exact hop-count parity.
 - **Live Data Ingestion**:
   - **EDDN Listener**: Automatically connects to the Elite Dangerous Data Network (EDDN) via ZeroMQ to ingest real-time universe state changes.
   - **EDMC Ingest**: Provides authenticated endpoints for custom Elite Dangerous Market Connector (EDMC) plugins to push journal updates and batch data.
@@ -117,7 +117,7 @@ cargo run --release
     - `destination` *(string, required)*: Destination system.
     - `range` *(float, required)*: The ship's base jump range in light-years.
     - `supercharge_type` *(string, required)*: Supercharge multiplier type (e.g. `caspian` for 6x boost, or others for standard 4x boost).
-    - `engine` *(string, optional)*: Pathfinding engine selection (`greedy` or `astar`).
+    - `engine` *(string, optional)*: Pathfinding engine selection (`greedy` or `astar`). Currently CPU-only: `astar` generates neighbors on-demand via a spatial grid within the exact boosted range, returning a provably minimal jump count.
 
 ### 4. Data Ingestion & Heatmaps
 - `POST /api/edmc/journal` & `POST /api/edmc/batch` - Custom EDMC plugin endpoints to ingest player journal events. Requires matching key in `ANANKE_EDMC_KEY` if configured.
@@ -134,5 +134,5 @@ Ananke utilizes a highly concurrent, thread-safe architecture:
 1. **Async Web Server**: Powered by `axum` routing request endpoints on tokio runtime threads.
 2. **Database Access & Throttling**: Managed through an `r2d2` pool of SQLite connections. Database queries are regulated using `tokio::sync::Semaphore` to prevent SQLite connection exhaustion and database locks.
 3. **Non-Blocking Write Worker**: Live data from the EDMC endpoints and the ZeroMQ EDDN listener thread is sent via `crossbeam-channel` queues to a single dedicated database writer thread. This isolates writes, preventing SQLite database locks from blocking the main web server.
-4. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. When route requests come in, Vulkan buffers are built and executed on the GPU, returning the optimal node path. Seamless CPU A* fallbacks are invoked if initialization fails or compute resources are busy.
+4. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. Standard ship and Fleet Carrier route requests build Vulkan buffers and execute on the GPU, returning the optimal node path, with seamless CPU A* fallbacks if initialization fails or compute resources are busy. Neutron routing is currently CPU-only (on-demand spatial-grid A*, see Routing section).
 
