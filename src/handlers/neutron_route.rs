@@ -374,7 +374,6 @@ async fn do_neutron_route(
         }
 
         // ── Determine the route ──────────────────────────────────────────────
-        // src can jump at boosted range if it is itself a neutron, else base.
         let src_range = if src_is_neutron { boosted_range } else { base_range };
 
         let final_path: Vec<i64>;
@@ -383,12 +382,8 @@ async fn do_neutron_route(
         if src_id == dst_id {
             final_path = vec![src_id];
         } else if dist_sq(x1, y1, z1, x2, y2, z2) <= src_range * src_range {
-            // Single direct jump.
             final_path = vec![src_id, dst_id];
         } else {
-            // Greedy best-first toward the destination: serves both as a tight
-            // upper bound (mu) that prunes the A*, and as the fallback for
-            // neutron-sparse regions where it can bridge across normal stars.
             let mut normal_stmt = conn
                 .prepare(
                     "SELECT i.id, i.minX, i.minY, i.minZ \
@@ -399,38 +394,37 @@ async fn do_neutron_route(
                 )
                 .map_err(|e| e.to_string())?;
 
+            // ── Phase 1: Greedy (upper bound + fallback) ─────────────────────
             let greedy_path = greedy_route(
                 &graph,
                 &mut normal_stmt,
                 &mut normal_nodes,
                 src_id,
                 dst_id,
-                x1,
-                y1,
-                z1,
-                x2,
-                y2,
-                z2,
+                x1, y1, z1,
+                x2, y2, z2,
                 base_range,
                 boosted_range,
             );
-            let greedy_len = greedy_path.as_ref().map(|p| p.len());
-            let mu_init = greedy_len.map(|l| (l - 1) as u32).unwrap_or(u32::MAX);
+            let greedy_jumps = greedy_path.as_ref().map(|p| (p.len() - 1) as u32);
+            let mu_init = greedy_jumps.unwrap_or(u32::MAX);
 
-            // Exact, provably-minimal-hop A* over the true reachability graph.
+            info!(
+                "Greedy: {} ({}ms)",
+                greedy_jumps.map_or("FAILED".to_string(), |j| format!("{} jumps", j)),
+                t_start.elapsed().as_millis()
+            );
+
+            // ── Phase 2: A* with wide-radius entry seeding ───────────────────
             let use_astar =
                 params.engine.as_deref().unwrap_or("astar").to_lowercase() != "greedy";
-            let astar_path = if use_astar {
+
+            let astar_result = if use_astar {
                 astar_min_hop(
                     &graph,
-                    src_id,
-                    dst_id,
-                    x1,
-                    y1,
-                    z1,
-                    x2,
-                    y2,
-                    z2,
+                    src_id, dst_id,
+                    x1, y1, z1,
+                    x2, y2, z2,
                     base_range,
                     boosted_range,
                     mu_init,
@@ -440,15 +434,93 @@ async fn do_neutron_route(
                 None
             };
 
-            // A neutron A* path, when one exists, is never longer than the
-            // greedy path (normal-star bridges can only match, never beat, a
-            // boosted neutron hop), so prefer it. Fall back to greedy otherwise.
-            match (astar_path, greedy_path) {
+            // ── Phase 3: If A* returned a neutron chain, build the full path ─
+            //
+            // astar_min_hop returns the pure neutron chain (entry neutron through
+            // exit neutron). We need to splice in the actual bridges:
+            //   source -> [entry bridge] -> [neutron chain] -> [exit] -> dest
+            //
+            // The A* used estimated entry costs (ceil(dist/base_range)) which may
+            // undercount. The bridge walk computes the real hop count. If the
+            // assembled path is still shorter than greedy, we use it.
+            let assembled_astar: Option<Vec<i64>> = astar_result.and_then(|neutron_chain| {
+                if neutron_chain.is_empty() {
+                    return None;
+                }
+
+                let entry_id = neutron_chain[0];
+                let exit_id = *neutron_chain.last().unwrap();
+
+                // Entry bridge: source -> first neutron in chain.
+                let entry_bridge: Vec<i64> = if src_id == entry_id {
+                    // Source IS the entry neutron (src is neutron on-chain).
+                    vec![src_id]
+                } else if src_is_neutron {
+                    // Source is a neutron but not the entry. One boosted hop.
+                    vec![src_id]
+                } else {
+                    // Source is a normal star. Walk through normal stars to the
+                    // entry neutron. This is the critical path that the old code
+                    // couldn't compute because it only seeded from base_range.
+                    let (ex, ey, ez, _) = get_node(&graph, &normal_nodes, entry_id);
+                    match bridge_to_neutron(
+                        &graph,
+                        &mut normal_stmt,
+                        &mut normal_nodes,
+                        src_id, x1, y1, z1,
+                        entry_id, ex, ey, ez,
+                        base_range,
+                        boosted_range,
+                    ) {
+                        Some(bridge) => bridge,
+                        None => {
+                            // Can't bridge to this neutron. Fall back.
+                            return None;
+                        }
+                    }
+                };
+
+                // Assemble: bridge + chain + exit.
+                let bridge_hops = entry_bridge.len().saturating_sub(1);
+                let chain_hops = neutron_chain.len().saturating_sub(1);
+                let mut full_path = entry_bridge;
+
+                // Append neutron chain (skip the entry neutron if it's already
+                // the last element of the bridge, avoiding a duplicate).
+                let chain_start = if full_path.last().copied() == Some(entry_id) {
+                    1
+                } else {
+                    0
+                };
+                full_path.extend_from_slice(&neutron_chain[chain_start..]);
+
+                // Append destination if it's not already the exit neutron.
+                if exit_id != dst_id {
+                    full_path.push(dst_id);
+                }
+
+                let assembled_jumps = (full_path.len() - 1) as u32;
+                info!(
+                    "A* assembled: {} jumps (bridge={}, chain={}) in {}ms",
+                    assembled_jumps, bridge_hops, chain_hops,
+                    t_start.elapsed().as_millis()
+                );
+
+                // Only use if it actually beats greedy.
+                if greedy_jumps.map_or(true, |gj| assembled_jumps < gj) {
+                    Some(full_path)
+                } else if greedy_jumps.map_or(false, |gj| assembled_jumps == gj) {
+                    // Same length but A* chain is all-neutron (better for the player).
+                    Some(full_path)
+                } else {
+                    None
+                }
+            });
+
+            match (assembled_astar, greedy_path) {
                 (Some(a), Some(gp)) => {
-                    if a.len() < gp.len() {
-                        is_optimal = true;
-                        final_path = a;
-                    } else if a.len() == gp.len() {
+                    if a.len() <= gp.len() {
+                        is_optimal = a.len() < gp.len();
                         final_path = a;
                     } else {
                         final_path = gp;
@@ -526,16 +598,24 @@ async fn do_neutron_route(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Exact unidirectional A* (minimum hop count) over the on-demand graph.
+// A* with wide-radius entry seeding.
 //
 // All neutron-to-neutron edges have unit cost and exist iff the pair is within
-// boosted_range, so min-jump == unit-cost shortest path. The heuristic
-// h_to_dst is an admissible lower bound, making this A* optimal. A virtual goal
-// node `n` absorbs the final hop to the (possibly normal) destination.
+// boosted_range, so min-jump == unit-cost shortest path. The heuristic h_to_dst
+// is admissible, making the neutron-chain portion of the search optimal.
 //
-// `mu_init` is the greedy jump count: an upper bound used to prune the search to
-// the optimal corridor. If the A* cannot strictly beat it, it returns None and
-// the caller keeps the greedy path (which is then optimal by definition).
+// When the source is NOT a neutron, the old code seeded from neutrons within
+// one base_range hop. That misses every neutron further than 75 LY, which is
+// where the good highway entry points are. The new seeding searches a wide
+// radius (up to boosted_range or 15x base_range) and estimates entry cost as
+// ceil(euclidean_dist / base_range). This is a lower bound on actual base hops,
+// so the chain the A* picks is the best *given optimistic entry estimates*.
+//
+// The caller (do_neutron_route) then computes the ACTUAL entry bridge through
+// normal stars and verifies the assembled total against the greedy fallback.
+//
+// Returns: the pure neutron chain (entry neutron through exit neutron), or None.
+//          Does NOT include src_id or dst_id; the caller handles bridging.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(clippy::too_many_arguments)]
@@ -570,9 +650,9 @@ fn astar_min_hop(
 
     let mut nbr: Vec<u32> = Vec::with_capacity(256);
 
-    // Seed. If src is a neutron it is a graph node at g=0; otherwise its reach
-    // is base_range and every entry neutron within it starts at g=1.
+    // ── Seed ─────────────────────────────────────────────────────────────────
     if let Some(si) = src_idx_opt {
+        // Source IS a neutron: start at g=0.
         g[si as usize] = 0;
         came[si as usize] = SENTINEL;
         open.push(ANode {
@@ -581,21 +661,46 @@ fn astar_min_hop(
             g: 0,
         });
     } else {
-        graph.collect_neighbors(sx, sy, sz, base_range, &mut nbr);
+        // Source is a normal star. Seed from ALL neutrons within a wide radius,
+        // estimating entry cost as ceil(dist / base_range). This lets the A*
+        // evaluate entry points the old single-hop seeding couldn't see.
+        //
+        // ceil(dist/base) is a LOWER BOUND on actual base-range hops (stars
+        // aren't on a perfect line). The caller verifies the real cost after
+        // the A* picks the best chain. The mu pruning ensures we only push
+        // seeds that can plausibly beat the greedy upper bound.
+        let entry_radius = boosted_range.max(base_range * 15.0);
+        nbr.clear();
+        graph.collect_neighbors(sx, sy, sz, entry_radius, &mut nbr);
+
+        let mut seed_count = 0u32;
         for &ni in &nbr {
-            if 1 < g[ni as usize] {
-                g[ni as usize] = 1;
-                came[ni as usize] = SENTINEL; // predecessor is the source
-                let hh = h_to_dst(graph, ni, dx, dy, dz, boosted_range);
+            let nx = graph.x[ni as usize] as f64;
+            let ny = graph.y[ni as usize] as f64;
+            let nz = graph.z[ni as usize] as f64;
+            let dist = dist_sq(sx, sy, sz, nx, ny, nz).sqrt();
+            let entry_hops = (dist / base_range).ceil() as u32;
+
+            let hh = h_to_dst(graph, ni, dx, dy, dz, boosted_range);
+            if entry_hops + hh >= mu {
+                continue; // pruned: can't beat greedy even with optimistic entry
+            }
+
+            if entry_hops < g[ni as usize] {
+                g[ni as usize] = entry_hops;
+                came[ni as usize] = SENTINEL;
                 open.push(ANode {
-                    f_bits: ((1 + hh) as f64).to_bits(),
+                    f_bits: ((entry_hops + hh) as f64).to_bits(),
                     idx: ni,
-                    g: 1,
+                    g: entry_hops,
                 });
+                seed_count += 1;
             }
         }
+        info!("A* seeded {} entry neutrons within {:.0} LY", seed_count, entry_radius);
     }
 
+    // ── Main loop ────────────────────────────────────────────────────────────
     while let Some(node) = open.pop() {
         if t_start.elapsed().as_millis() > REFINE_BUDGET_MS {
             break;
@@ -604,7 +709,7 @@ fn astar_min_hop(
         let gg = node.g;
 
         if idx == goal {
-            break; // g[goal]/came[goal] are set; reconstruct below
+            break;
         }
         if closed[idx as usize] {
             continue;
@@ -612,8 +717,6 @@ fn astar_min_hop(
         if gg > g[idx as usize] {
             continue;
         }
-        // Optimal-termination prune: the smallest-f frontier node already costs
-        // at least the best known total, so nothing remaining can improve it.
         if gg + h_to_dst(graph, idx, dx, dy, dz, boosted_range) >= mu {
             break;
         }
@@ -676,7 +779,9 @@ fn astar_min_hop(
         return None;
     }
 
-    // Reconstruct the neutron chain from the goal's predecessor back to a seed.
+    // ── Reconstruct the pure neutron chain ────────────────────────────────────
+    // Walk came_from from the goal's predecessor back to a seed. The result is
+    // the neutron-only chain; the caller handles source/destination bridging.
     let mut chain: Vec<u32> = Vec::new();
     let mut cur = came[goal as usize];
     let mut steps = 0usize;
@@ -685,19 +790,195 @@ fn astar_min_hop(
         cur = came[cur as usize];
         steps += 1;
         if steps > n + 2 {
-            return None; // malformed; refuse rather than loop
+            return None;
         }
     }
     chain.reverse();
 
-    let mut path: Vec<i64> = chain.iter().map(|&i| graph.id64[i as usize]).collect();
-    if src_idx_opt.is_none() {
-        path.insert(0, src_id); // src was a normal star
+    let path: Vec<i64> = chain.iter().map(|&i| graph.id64[i as usize]).collect();
+    if path.is_empty() {
+        return None;
     }
-    if !dst_is_neutron {
-        path.push(dst_id); // final hop to a normal destination
-    }
+
+    info!(
+        "A* chain: {} neutron hops, estimated total {} jumps",
+        path.len().saturating_sub(1),
+        g[goal as usize]
+    );
     Some(path)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bridge from a normal star to a specific neutron through normal stars.
+//
+// Greedy walk from (sx,sy,sz) toward the target neutron (tx,ty,tz), using
+// base_range hops through the systems_index table. At each step, also checks
+// if any in-range neutron is closer to the target (to hop onto the neutron
+// grid early if possible). Terminates when the target is within jump range.
+//
+// Returns the bridge path INCLUDING the source but EXCLUDING the target
+// (the caller appends the target as part of the neutron chain).
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[allow(clippy::too_many_arguments)]
+fn bridge_to_neutron(
+    graph: &NeutronGraph,
+    normal_stmt: &mut rusqlite::Statement,
+    normal_nodes: &mut HashMap<i64, (f64, f64, f64)>,
+    src_id: i64,
+    sx: f64,
+    sy: f64,
+    sz: f64,
+    target_id: i64,
+    tx: f64,
+    ty: f64,
+    tz: f64,
+    base_range: f64,
+    boosted_range: f64,
+) -> Option<Vec<i64>> {
+    let mut path = vec![src_id];
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(src_id);
+    let (mut cx, mut cy, mut cz) = (sx, sy, sz);
+    let mut cur_id = src_id;
+    let mut cur_is_neutron = graph.id_map.contains_key(&src_id);
+    let mut nbr: Vec<u32> = Vec::with_capacity(256);
+
+    for _ in 0..500usize {
+        let cur_range = if cur_is_neutron { boosted_range } else { base_range };
+        let d_target = dist_sq(cx, cy, cz, tx, ty, tz).sqrt();
+
+        // Can we reach the target directly?
+        if d_target <= cur_range {
+            return Some(path);
+        }
+
+        // Look for neutrons within range that are closer to the target.
+        // Prioritise the target itself, then any neutron making progress.
+        nbr.clear();
+        graph.collect_neighbors(cx, cy, cz, cur_range, &mut nbr);
+
+        let mut best_neutron_id: Option<i64> = None;
+        let mut best_neutron_pos = (0.0f64, 0.0f64, 0.0f64);
+        let mut best_neutron_d = d_target;
+
+        for &ni in &nbr {
+            let nid = graph.id64[ni as usize];
+            if visited.contains(&nid) {
+                continue;
+            }
+            let nx = graph.x[ni as usize] as f64;
+            let ny = graph.y[ni as usize] as f64;
+            let nz = graph.z[ni as usize] as f64;
+            let nd = dist_sq(nx, ny, nz, tx, ty, tz).sqrt();
+            if nd < best_neutron_d {
+                best_neutron_d = nd;
+                best_neutron_id = Some(nid);
+                best_neutron_pos = (nx, ny, nz);
+            }
+        }
+
+        if let Some(nid) = best_neutron_id {
+            visited.insert(nid);
+            path.push(nid);
+            cur_id = nid;
+            cx = best_neutron_pos.0;
+            cy = best_neutron_pos.1;
+            cz = best_neutron_pos.2;
+            cur_is_neutron = true;
+            continue;
+        }
+
+        // No useful neutron. Step through a normal star toward the target.
+        let moved = attempt_normal_move_targeted(
+            normal_stmt,
+            normal_nodes,
+            &mut visited,
+            &mut path,
+            &mut cur_id,
+            &mut cx,
+            &mut cy,
+            &mut cz,
+            tx, ty, tz,
+            cur_range,
+        )
+        .ok()?;
+
+        if !moved {
+            return None;
+        }
+        cur_is_neutron = graph.id_map.contains_key(&cur_id);
+    }
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Normal-star step toward a specific target. Shared by bridge_to_neutron and
+// the greedy fallback. Picks the in-range normal star closest to (tx,ty,tz).
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_normal_move_targeted(
+    stmt: &mut rusqlite::Statement,
+    normal_nodes: &mut HashMap<i64, (f64, f64, f64)>,
+    visited: &mut HashSet<i64>,
+    path: &mut Vec<i64>,
+    cur_id: &mut i64,
+    cx: &mut f64,
+    cy: &mut f64,
+    cz: &mut f64,
+    tx: f64,
+    ty: f64,
+    tz: f64,
+    range: f64,
+) -> Result<bool, String> {
+    let d_target = dist_sq(*cx, *cy, *cz, tx, ty, tz);
+
+    for &r in &[range, range * 1.05] {
+        let rows: Vec<(i64, f64, f64, f64)> = stmt
+            .query_map(
+                rusqlite::params![*cx - r, *cx + r, *cy - r, *cy + r, *cz - r, *cz + r],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, f64>(3)?,
+                    ))
+                },
+            )
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .filter(|&(nid, nx, ny, nz)| {
+                if nid == *cur_id || visited.contains(&nid) {
+                    return false;
+                }
+                let d2 = dist_sq(nx, ny, nz, *cx, *cy, *cz);
+                d2 <= r * r && d2 > 0.0
+            })
+            .collect();
+
+        let best = rows
+            .iter()
+            .filter(|&&(_, nx, ny, nz)| dist_sq(nx, ny, nz, tx, ty, tz) < d_target)
+            .min_by(|a, b| {
+                let da = dist_sq(a.1, a.2, a.3, tx, ty, tz);
+                let db = dist_sq(b.1, b.2, b.3, tx, ty, tz);
+                da.partial_cmp(&db).unwrap_or(Ordering::Equal)
+            });
+
+        if let Some(&(nid, nx, ny, nz)) = best {
+            normal_nodes.insert(nid, (nx, ny, nz));
+            visited.insert(nid);
+            path.push(nid);
+            *cur_id = nid;
+            *cx = nx;
+            *cy = ny;
+            *cz = nz;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -774,7 +1055,7 @@ fn greedy_route(
         }
 
         // Sparse region: bridge across a normal star.
-        let moved = attempt_normal_move_simple(
+        let moved = attempt_normal_move_targeted(
             normal_stmt,
             normal_nodes,
             &mut visited,
@@ -795,74 +1076,6 @@ fn greedy_route(
         cur_is_neutron = false;
     }
     None
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Normal-system fallback for the greedy phase (toward the destination).
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[allow(clippy::too_many_arguments)]
-fn attempt_normal_move_simple(
-    stmt: &mut rusqlite::Statement,
-    normal_nodes: &mut HashMap<i64, (f64, f64, f64)>,
-    visited: &mut HashSet<i64>,
-    path: &mut Vec<i64>,
-    cur_id: &mut i64,
-    cx: &mut f64,
-    cy: &mut f64,
-    cz: &mut f64,
-    dx: f64,
-    dy: f64,
-    dz: f64,
-    range: f64,
-) -> Result<bool, String> {
-    let d_dst = dist_sq(*cx, *cy, *cz, dx, dy, dz);
-
-    for &r in &[range, range * 1.05] {
-        let rows: Vec<(i64, f64, f64, f64)> = stmt
-            .query_map(
-                rusqlite::params![*cx - r, *cx + r, *cy - r, *cy + r, *cz - r, *cz + r],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, f64>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, f64>(3)?,
-                    ))
-                },
-            )
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .filter(|&(nid, nx, ny, nz)| {
-                if nid == *cur_id || visited.contains(&nid) {
-                    return false;
-                }
-                let d2 = dist_sq(nx, ny, nz, *cx, *cy, *cz);
-                d2 <= r * r && d2 > 0.0
-            })
-            .collect();
-
-        let best = rows
-            .iter()
-            .filter(|&&(_, nx, ny, nz)| dist_sq(nx, ny, nz, dx, dy, dz) < d_dst)
-            .min_by(|a, b| {
-                let da = dist_sq(a.1, a.2, a.3, dx, dy, dz);
-                let db = dist_sq(b.1, b.2, b.3, dx, dy, dz);
-                da.partial_cmp(&db).unwrap_or(Ordering::Equal)
-            });
-
-        if let Some(&(nid, nx, ny, nz)) = best {
-            normal_nodes.insert(nid, (nx, ny, nz));
-            visited.insert(nid);
-            path.push(nid);
-            *cur_id = nid;
-            *cx = nx;
-            *cy = ny;
-            *cz = nz;
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
