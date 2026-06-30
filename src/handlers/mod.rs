@@ -6,3 +6,4 @@ pub mod carrier_route;
 pub mod neutron_route;
 pub mod progression;
 pub mod edmc;
+pub mod bubble;

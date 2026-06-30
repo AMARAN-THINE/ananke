@@ -11,6 +11,7 @@ mod sync;
 mod vulkan_astar;
 
 use crossbeam_channel::bounded;
+use std::collections::HashMap;
 use std::sync::{Arc, atomic::AtomicU64};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -143,6 +144,7 @@ async fn main() {
         query_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
         astar_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_ASTAR)),
         carrier_cache: Mutex::new(CarrierCache { data: None, expires_at: 0 }),
+        bubble_cache: Mutex::new(HashMap::new()),
         edmc_sender,
         edmc_api_key,
         edmc_stats: Arc::new(EdmcStats {
@@ -177,6 +179,7 @@ async fn main() {
         .route("/api/neutron-route", post(handlers::neutron_route::neutron_route_post))
         // Progression
         .route("/api/galtea-progression", get(handlers::progression::get_carrier_progression))
+        .route("/api/bubble-progress", get(handlers::bubble::get_bubble_progress))
         // EDMC ingest
         .route("/api/edmc/journal", post(handlers::edmc::edmc_journal))
         .route("/api/edmc/batch", post(handlers::edmc::edmc_batch))

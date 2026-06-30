@@ -1,9 +1,11 @@
 use crossbeam_channel::Sender;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use std::collections::HashMap;
 use std::sync::{Arc, atomic::AtomicU64};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
+use crate::handlers::bubble::BubbleCacheEntry;
 use crate::handlers::neutron_route::NeutronGraph;
 use crate::heatmap::Heatmap;
 use crate::models::SpanshSystem;
@@ -15,6 +17,7 @@ pub struct AppState {
     pub query_semaphore: Arc<Semaphore>,
     pub astar_semaphore: Arc<Semaphore>,
     pub carrier_cache: Mutex<CarrierCache>,
+    pub bubble_cache: Mutex<HashMap<String, BubbleCacheEntry>>,
     pub edmc_sender: Sender<Vec<SpanshSystem>>,
     pub edmc_api_key: Option<String>,
     pub edmc_stats: Arc<EdmcStats>,

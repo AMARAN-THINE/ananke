@@ -15,6 +15,7 @@ Ananke is a high-performance, concurrent Rust-based backend API for the Galtea p
 - **Automated Data Syncing**: A background sync manager downloads Spansh galaxy 1-day system dumps (`galaxy_1day.json.gz`) every 6 hours and processes them automatically, backfilling the database.
 - **Real-time Heatmap**: In-memory decay heatmap of galaxy activity generated dynamically as a PNG (`/api/heatmap.png`) or rendered as HTML (`/heatmap`).
 - **Fleet Carrier Tracking**: Progression endpoints tracking specific carrier movements (`/api/galtea-progression`).
+- **Bubble Colonisation Progress**: Tier-weighted colonisation progress tracking for any capital system bubble up to 500 ly, sliced into concentric distance rings (`/api/bubble-progress`).
 
 ---
 
@@ -126,6 +127,72 @@ cargo run --release
 - `GET /heatmap` - HTML interface for visualizing the activity heatmap.
 - `GET /api/galtea-progression` - Retrieve logged Fleet Carrier movement progression coordinates.
 
+### 5. Colonisation Progress
+- `GET /api/bubble-progress` - Returns tier-weighted colonisation progress for all colonisation-worthy systems within a sphere centred on a named capital system. Results are cached per unique `(capital, radius, ring_size)` triple for **1 hour** (LRU cap of 16 entries).
+  - **Query Parameters**:
+    - `capital` *(string, required)*: Capital system name (case-insensitive).
+    - `radius` *(float, optional, default: `250`, max: `500`)*: Bubble radius in light-years.
+    - `ring_size` *(float, optional, default: `50`, min: `10`)*: Width of each concentric distance ring in light-years.
+  - **How targets are selected**: A system is included if it contains at least one body matching any of these criteria:
+    - Body sub-type is `Earth-like world` or `Earthlike body`
+    - Body sub-type is `Water world` or `Ammonia world`
+    - Body `terraformingState` is `Terraformable` or `Terraforming completed`
+  - **Tier weighting**: Each qualifying system is assigned a tier based on its *best* body:
+
+    | Tier | Body type | Weight |
+    | :--- | :--- | :---: |
+    | T3 | Earth-like world | ×5 |
+    | T2 | Water world / Ammonia world | ×3 |
+    | T1 | Terraformable (all other types) | ×1 |
+
+    `weighted_progress` = Σ(weights of inhabited systems) ÷ Σ(weights of all target systems). This means colonising a T3 system moves the progress bar 5× as much as a T1 system.
+  - **Ring slicing**: The sphere is divided into `ceil(radius / ring_size)` concentric shells. Each ring independently reports `target_systems`, `inhabited_systems`, `raw_progress`, `weighted_score`, `weighted_max`, `weighted_progress`, and a full `systems` list.
+  - **Response shape** *(abbreviated)*:
+    ```json
+    {
+      "capital": { "id64": "...", "name": "...", "coords": { "x": 0.0, "y": 0.0, "z": 0.0 } },
+      "radius_ly": 250.0,
+      "ring_size_ly": 50.0,
+      "overall": {
+        "target_systems": 497,
+        "inhabited_systems": 0,
+        "raw_progress": 0.0,
+        "weighted_score": 0,
+        "weighted_max": 1297,
+        "weighted_progress": 0.0
+      },
+      "tiers": {
+        "t3_earthlike":     { "target": 42,  "inhabited": 0 },
+        "t2_water_ammonia": { "target": 316, "inhabited": 0 },
+        "t1_terraformable": { "target": 139, "inhabited": 0 }
+      },
+      "rings": [
+        {
+          "inner_ly": 0.0, "outer_ly": 50.0,
+          "target_systems": 136, "inhabited_systems": 0,
+          "raw_progress": 0.0,
+          "weighted_score": 0, "weighted_max": 338,
+          "weighted_progress": 0.0,
+          "systems": [
+            {
+              "id64": "...", "name": "...",
+              "distance_ly": 12.34,
+              "population": 0,
+              "inhabited": false,
+              "tier": 3, "tier_label": "Earth-like",
+              "weight": 5,
+              "body_types": "Earth-like world,High metal content world"
+            }
+          ]
+        }
+      ]
+    }
+    ```
+  - **Error responses**:
+    - `404 Not Found` — capital system name not found in the database.
+    - `503 Service Unavailable` — server query semaphore is exhausted (too many concurrent requests).
+    - `500 Internal Server Error` — unexpected database error.
+
 ---
 
 ## Architecture
@@ -133,6 +200,7 @@ cargo run --release
 Ananke utilizes a highly concurrent, thread-safe architecture:
 1. **Async Web Server**: Powered by `axum` routing request endpoints on tokio runtime threads.
 2. **Database Access & Throttling**: Managed through an `r2d2` pool of SQLite connections. Database queries are regulated using `tokio::sync::Semaphore` to prevent SQLite connection exhaustion and database locks.
+3. **In-Memory Caching**: `AppState` holds lightweight `Mutex<HashMap>` caches for endpoints whose results are expensive to compute but change infrequently. The carrier cache (`carrier_cache`) and bubble progress cache (`bubble_cache`) both follow this pattern — results are stored with an `expires_at` timestamp and evicted lazily on the next miss after TTL expiry. The bubble cache additionally caps at 16 entries, evicting the soonest-to-expire entry when full to prevent unbounded growth.
 3. **Non-Blocking Write Worker**: Live data from the EDMC endpoints and the ZeroMQ EDDN listener thread is sent via `crossbeam-channel` queues to a single dedicated database writer thread. This isolates writes, preventing SQLite database locks from blocking the main web server.
-4. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. Fleet Carrier route requests build Vulkan buffers and execute on the GPU, returning the optimal node path, with a seamless CPU A* fallback if initialization fails, compute resources are busy, or the GPU result doesn't improve on the greedy baseline. Standard ship routing and neutron routing are both CPU-only (see Routing section).
+5. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. Fleet Carrier route requests build Vulkan buffers and execute on the GPU, returning the optimal node path, with a seamless CPU A* fallback if initialization fails, compute resources are busy, or the GPU result doesn't improve on the greedy baseline. Standard ship routing and neutron routing are both CPU-only (see Routing section).
 
