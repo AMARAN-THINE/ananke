@@ -322,30 +322,8 @@ async fn do_neutron_route(
         let t_start = Instant::now();
 
         // ── Resolve source / destination ─────────────────────────────────────
-        let get_sys = |input: &str| -> Result<(i64, String, f64, f64, f64), String> {
-            if let Ok(id) = input.parse::<i64>() {
-                conn.query_row(
-                    "SELECT s.id64, s.name, i.minX, i.minY, i.minZ \
-                     FROM systems s JOIN systems_index i ON s.id64=i.id \
-                     WHERE s.id64=? LIMIT 1",
-                    rusqlite::params![id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                )
-                .map_err(|_| format!("System ID '{}' not found", input))
-            } else {
-                conn.query_row(
-                    "SELECT s.id64, s.name, i.minX, i.minY, i.minZ \
-                     FROM systems s JOIN systems_index i ON s.id64=i.id \
-                     WHERE s.name=? COLLATE NOCASE LIMIT 1",
-                    rusqlite::params![input],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                )
-                .map_err(|_| format!("System '{}' not found", input))
-            }
-        };
-
-        let (src_id, _src_name, x1, y1, z1) = get_sys(&params.source)?;
-        let (dst_id, _dst_name, x2, y2, z2) = get_sys(&params.destination)?;
+        let (src_id, _src_name, x1, y1, z1) = crate::procgen::resolve_system(&conn, &params.source)?;
+        let (dst_id, _dst_name, x2, y2, z2) = crate::procgen::resolve_system(&conn, &params.destination)?;
 
         let total_distance = dist_sq(x1, y1, z1, x2, y2, z2).sqrt();
         let multiplier = if params.supercharge_type.to_lowercase() == "caspian" {

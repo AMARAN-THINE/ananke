@@ -73,6 +73,7 @@ pub fn init_db(conn: &Connection) -> SqliteResult<()> {
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS neutron_systems (systemId64 INTEGER PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS prison_systems  (systemId64 INTEGER PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS sector_coords (sector_name TEXT PRIMARY KEY COLLATE NOCASE, sector_x INTEGER NOT NULL, sector_y INTEGER NOT NULL, sector_z INTEGER NOT NULL);
     ")?;
 
     // Migration: add new columns to existing tables (safe to repeat)
@@ -140,6 +141,7 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                     let mut stmt_stations = tx.prepare_cached("INSERT INTO stations (id, marketId, systemId64, name, type, distanceToArrival, allegiance, government, economy, secondEconomy, haveMarket, haveShipyard, haveOutfitting, otherServices, updateTime, realName, carrierName, controllingFaction, controllingFactionState, state, latitude, longitude, landingPads, carrierDockingAccess, economies, market, shipyard, outfitting) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(systemId64, id) DO UPDATE SET marketId = COALESCE(excluded.marketId, stations.marketId), name = COALESCE(excluded.name, stations.name), type = COALESCE(excluded.type, stations.type), distanceToArrival = COALESCE(excluded.distanceToArrival, stations.distanceToArrival), allegiance = COALESCE(excluded.allegiance, stations.allegiance), government = COALESCE(excluded.government, stations.government), economy = COALESCE(excluded.economy, stations.economy), secondEconomy = COALESCE(excluded.secondEconomy, stations.secondEconomy), haveMarket = MAX(excluded.haveMarket, stations.haveMarket), haveShipyard = MAX(excluded.haveShipyard, stations.haveShipyard), haveOutfitting = MAX(excluded.haveOutfitting, stations.haveOutfitting), otherServices = COALESCE(NULLIF(excluded.otherServices, '[]'), stations.otherServices), updateTime = COALESCE(excluded.updateTime, stations.updateTime), realName = COALESCE(excluded.realName, stations.realName), carrierName = COALESCE(excluded.carrierName, stations.carrierName), controllingFaction = COALESCE(excluded.controllingFaction, stations.controllingFaction), controllingFactionState = COALESCE(excluded.controllingFactionState, stations.controllingFactionState), state = COALESCE(excluded.state, stations.state), latitude = COALESCE(excluded.latitude, stations.latitude), longitude = COALESCE(excluded.longitude, stations.longitude), landingPads = COALESCE(excluded.landingPads, stations.landingPads), carrierDockingAccess = COALESCE(excluded.carrierDockingAccess, stations.carrierDockingAccess), economies = COALESCE(excluded.economies, stations.economies), market = COALESCE(excluded.market, stations.market), shipyard = COALESCE(excluded.shipyard, stations.shipyard), outfitting = COALESCE(excluded.outfitting, stations.outfitting)")?;
                     let mut stmt_neutron = tx.prepare_cached("INSERT OR IGNORE INTO neutron_systems (systemId64) VALUES (?)")?;
                     let mut stmt_prison  = tx.prepare_cached("INSERT OR IGNORE INTO prison_systems (systemId64) VALUES (?)")?;
+                    let mut stmt_sector  = tx.prepare_cached("INSERT OR IGNORE INTO sector_coords (sector_name, sector_x, sector_y, sector_z) VALUES (?, ?, ?, ?)")?;
 
                     let now = current_time_secs() as i64;
                     for sys in &batch {
@@ -165,6 +167,11 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                             .unwrap_or(false)
                         {
                             stmt_prison.execute(params![sys.id64]).ok();
+                        }
+
+                        if let Some(pg) = crate::procgen::parse_procgen_name(&sys.name) {
+                            let (sx, sy, sz) = crate::procgen::sector_coords_from_id64(sys.id64);
+                            stmt_sector.execute(params![pg.sector_name, sx, sy, sz]).ok();
                         }
 
                         if let Some(c) = &sys.coords {

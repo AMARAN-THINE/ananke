@@ -7,3 +7,4 @@ pub mod neutron_route;
 pub mod progression;
 pub mod edmc;
 pub mod bubble;
+pub mod procgen;

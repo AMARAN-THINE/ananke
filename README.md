@@ -16,6 +16,7 @@ Ananke is a high-performance, concurrent Rust-based backend API for the Galtea p
 - **Real-time Heatmap**: In-memory decay heatmap of galaxy activity generated dynamically as a PNG (`/api/heatmap.png`) or rendered as HTML (`/heatmap`).
 - **Fleet Carrier Tracking**: Progression endpoints tracking specific carrier movements (`/api/galtea-progression`).
 - **Bubble Colonisation Progress**: Tier-weighted colonisation progress tracking for any capital system bubble up to 500 ly, sliced into concentric distance rings (`/api/bubble-progress`).
+- **ProcGen Name Decoding**: Derives approximate galactic coordinates from any procedurally generated Elite Dangerous system name — no database lookup required. Routing endpoints also fall back to ProcGen estimation when a system isn't in the DB, enabling route planning to undiscovered systems. Based on the algorithm from [EDTS](https://github.com/dartharnold/EDTS) by CMDR Alot (DarthArnold) / Esvandiary.
 
 ---
 
@@ -29,6 +30,7 @@ Ananke stores galaxy information in a local SQLite database (`edsm_cube.db`) con
 - **`stations`**: In-system stations, outposts, and fleet carriers, including services, landing pad sizes, market items, shipyards, outfitting options, and docking accessibility.
 - **`neutron_systems`**: An indexed sub-table tracking system IDs that contain a Neutron Star to optimize route plotting.
 - **`prison_systems`**: An indexed sub-table tracking system IDs containing prison facilities/megaships.
+- **`sector_coords`**: Maps ProcGen sector names to their sector grid coordinates (derived from id64 during data ingestion). Used as ground-truth validation alongside the pure-math decoder.
 - **`meta`**: Simple key-value store for sync history and database state tracking.
 
 ---
@@ -72,6 +74,24 @@ cargo run --release
   - **Query Parameters**: Same as `/api/system`.
 - `GET /api/system/stations` or `GET /api/stations` - List all stations and fleet carriers in a system.
   - **Query Parameters**: Same as `/api/system`.
+- `GET /api/system/estimate` - Derive approximate galactic coordinates from a procedurally generated system name (no database lookup).
+  - **Query Parameters**:
+    - `systemName` / `name` *(string, required)*: A ProcGen system name (e.g. `Eol Prou RS-T d3-94`).
+  - **Response**:
+    ```json
+    {
+      "name": "Eol Prou RS-T d3-94",
+      "estimatedCoords": { "x": -9530.5, "y": -910.0, "z": 19808.0 },
+      "uncertaintyLy": 40.0,
+      "massCode": "d",
+      "sector": "Eol Prou",
+      "source": "procgen_decode"
+    }
+    ```
+  - **Error responses**:
+    - `400 Bad Request` — missing parameter or name is not a valid ProcGen system name.
+    - `404 Not Found` — sector name could not be decoded to coordinates.
+  - **Note**: Routing endpoints (`/api/route`, `/api/carrier-route`, `/api/neutron-route`) and cube-search (`/api/cube-search`) also fall back to ProcGen coordinate estimation automatically when a system is not found in the database.
 - `GET /api/distance` - Get the 3D Euclidean distance between two star systems.
   - **Query Parameters**:
     - `systemA` / `system_a` / `from` *(string, required)*: Starting system name.
@@ -203,4 +223,10 @@ Ananke utilizes a highly concurrent, thread-safe architecture:
 3. **In-Memory Caching**: `AppState` holds lightweight `Mutex<HashMap>` caches for endpoints whose results are expensive to compute but change infrequently. The carrier cache (`carrier_cache`) and bubble progress cache (`bubble_cache`) both follow this pattern — results are stored with an `expires_at` timestamp and evicted lazily on the next miss after TTL expiry. The bubble cache additionally caps at 16 entries, evicting the soonest-to-expire entry when full to prevent unbounded growth.
 3. **Non-Blocking Write Worker**: Live data from the EDMC endpoints and the ZeroMQ EDDN listener thread is sent via `crossbeam-channel` queues to a single dedicated database writer thread. This isolates writes, preventing SQLite database locks from blocking the main web server.
 5. **Vulkan A* Pathfinding**: Initializes the Vulkan instance and compiles pathfinding compute shaders once at startup. Fleet Carrier route requests build Vulkan buffers and execute on the GPU, returning the optimal node path, with a seamless CPU A* fallback if initialization fails, compute resources are busy, or the GPU result doesn't improve on the greedy baseline. Standard ship routing and neutron routing are both CPU-only (see Routing section).
+6. **ProcGen Decoder**: A pure-math module (`procgen.rs`) that parses Elite Dangerous procedurally generated system names into fragment indices, computes sector coordinates via interleaved Jenkins-32 hashing, and derives approximate galactic (x, y, z) positions with a known uncertainty radius. No external API or lookup table is required for the core decode — routing handlers fall back to this when a system is absent from the database.
 
+---
+
+## Acknowledgements
+
+The ProcGen system name decoder is a Rust port of the algorithm from **[EDTS (Elite Dangerous Trading System)](https://github.com/dartharnold/EDTS)** by CMDR Alot (DarthArnold) and Esvandiary. The original Python implementation (`pgnames.py`, `pgdata.py`, `sector.py`, `util.py`) provided the fragment tables, sector offset maths, and Jenkins-32 hashing logic that this module is based on. Full credit to the EDTS authors for reverse-engineering the Elite Dangerous procedural name generation system.

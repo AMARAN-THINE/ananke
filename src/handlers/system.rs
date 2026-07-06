@@ -107,7 +107,7 @@ pub async fn get_system_bodies(
             Err(_) => return Ok(serde_json::json!({"bodies": []})),
         };
 
-        let mut stmt = conn.prepare("SELECT * FROM bodies WHERE systemId64 = ? ORDER BY distanceToArrival ASC").unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM bodies WHERE systemId64 = ? ORDER BY name ASC").unwrap();
         let rows = stmt.query_map(params![sys_id], |b| {
             let is_landable: i64 = b.get("isLandable").unwrap_or(0);
             let is_tidally_locked: i64 = b.get("isTidallyLocked").unwrap_or(0);

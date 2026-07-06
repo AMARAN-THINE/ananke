@@ -214,6 +214,43 @@ pub async fn sync_manager() {
                 }
             }
 
+            // One-time backfill: sector_coords
+            let sector_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sector_coords", [], |r| r.get(0)
+            ).unwrap_or(0);
+            if sector_count < 10000 {
+                let sys_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM systems LIMIT 1", [], |r| r.get(0)
+                ).unwrap_or(0);
+                if sys_count > 0 {
+                    info!("Backfilling sector_coords from existing systems (one-time migration)...");
+                    let mut stmt = conn.prepare(
+                        "SELECT id64, name FROM systems WHERE name IS NOT NULL"
+                    ).unwrap();
+                    let mut insert = conn.prepare(
+                        "INSERT OR IGNORE INTO sector_coords (sector_name, sector_x, sector_y, sector_z) VALUES (?1, ?2, ?3, ?4)"
+                    ).unwrap();
+                    let mut rows = stmt.query([]).unwrap();
+                    let mut count = 0u64;
+                    while let Some(row) = rows.next().unwrap() {
+                        let id64: i64 = row.get(0).unwrap();
+                        let name: String = row.get(1).unwrap();
+                        if let Some(pg) = crate::procgen::parse_procgen_name(&name) {
+                            let (sx, sy, sz) = crate::procgen::sector_coords_from_id64(id64);
+                            insert.execute(rusqlite::params![pg.sector_name, sx, sy, sz]).ok();
+                            count += 1;
+                            if count % 500_000 == 0 {
+                                info!("  ...processed {} ProcGen systems", count);
+                            }
+                        }
+                    }
+                    info!("sector_coords backfill complete: {} sectors from {} ProcGen systems.",
+                        conn.query_row("SELECT COUNT(*) FROM sector_coords", [], |r| r.get::<_, i64>(0)).unwrap_or(0),
+                        count
+                    );
+                }
+            }
+
             let last_sync: Result<String, _> = conn.query_row("SELECT value FROM meta WHERE key='last_sync_time'", [], |row| row.get(0));
             let last_sync_time: u64 = last_sync.unwrap_or_else(|_| "0".to_string()).parse().unwrap_or(0);
             let age = current_time_secs() - last_sync_time;

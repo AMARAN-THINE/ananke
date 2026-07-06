@@ -19,8 +19,8 @@ async fn do_cube_search(
 
         let ref_sys = params.ref_system.or(params.center);
         if let Some(sys_name) = &ref_sys {
-            if let Ok(row) = conn.query_row("SELECT i.minX, i.minY, i.minZ FROM systems s JOIN systems_index i ON s.id64=i.id WHERE s.name=? COLLATE NOCASE LIMIT 1", rusqlite::params![sys_name], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?))) {
-                cx = row.0; cy = row.1; cz = row.2;
+            if let Ok((_id, _name, rx, ry, rz)) = crate::procgen::resolve_system(&conn, sys_name) {
+                cx = rx; cy = ry; cz = rz;
             }
         }
 
@@ -248,7 +248,7 @@ async fn do_cube_search(
 
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![&min_x, &max_x, &min_y, &max_y, &min_z, &max_z];
-            
+
             if let Some(ref rp) = ring_param {
                 query_params.push(rp);
             }

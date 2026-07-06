@@ -6,6 +6,7 @@ mod eddn;
 mod heatmap;
 mod handlers;
 mod models;
+mod procgen;
 mod state;
 mod sync;
 mod vulkan_astar;
@@ -164,6 +165,7 @@ async fn main() {
     let app = Router::new()
         // System data
         .route("/api/system", get(handlers::system::get_system))
+        .route("/api/system/estimate", get(handlers::procgen::estimate_system))
         .route("/api/system/bodies", get(handlers::system::get_system_bodies))
         .route("/api/bodies", get(handlers::system::get_system_bodies))
         .route("/api/system/stations", get(handlers::system::get_system_stations))
