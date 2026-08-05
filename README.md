@@ -1,6 +1,6 @@
 # Ananke
 
-Ananke is a high-performance, concurrent Rust-based backend API for the Galtea project (an Elite Dangerous tool suite). It is designed to handle extremely fast 3D geospatial searching, advanced routing, real-time activity heatmaps, and live data ingestion using a local SQLite database and optional Vulkan-accelerated GPU pathfinding.
+Ananke is a high-performance, concurrent Rust-based backend API for project Galtea. It is designed to handle extremely fast 3D geospatial searching, advanced routing, and live data ingestion using a local SQLite database and optional Vulkan-accelerated GPU pathfinding.
 
 ---
 
