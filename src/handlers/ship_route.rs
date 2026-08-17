@@ -1,27 +1,41 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Extension, Json,
+};
 use std::{
     collections::{BinaryHeap, HashMap},
     sync::Arc,
-    time::Instant,
 };
 
+use crate::admission::{overloaded_tuple, Admission, CancelOnDrop, Deadline};
 use crate::config::SHIP_ROUTE_BUDGET_MS;
 use crate::models::{RouteNode, RouteQuery};
 use crate::state::AppState;
 
 async fn do_ship_route(
     state: Arc<AppState>,
+    admission: Admission,
     params: RouteQuery,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.astar_semaphore.acquire().await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded — A* queue full".into()))?;
+    // Claim a heavy slot up front. The permit is moved into the blocking task
+    // below so the slot is held for the duration of the actual solve, not the
+    // lifetime of the connection.
+    let slot = admission.try_heavy().ok_or_else(overloaded_tuple)?;
+    let (permit, cancel) = slot.split();
+
+    // Dropped when this future is dropped, i.e. when the client disconnects.
+    // That flips the flag the solver polls.
+    let _disconnect_guard = CancelOnDrop::new(cancel.clone());
 
     let pool = state.db_pool.clone();
     let source_name = params.source.clone();
     let dest_name = params.destination.clone();
 
     let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let _permit = permit;
         let conn = pool.get().map_err(|e| e.to_string())?;
-        let t_start = Instant::now();
+        let deadline = Deadline::new(SHIP_ROUTE_BUDGET_MS, cancel);
 
         let get_sys = |sys_input: &str| -> Result<(i64, String, f64, f64, f64), String> {
             if let Ok(id) = sys_input.parse::<i64>() {
@@ -113,7 +127,10 @@ async fn do_ship_route(
             }
 
             max_iterations -= 1;
-            if max_iterations == 0 || t_start.elapsed().as_millis() > SHIP_ROUTE_BUDGET_MS {
+            if deadline.cancelled() {
+                return Err("Route cancelled: client disconnected.".to_string());
+            }
+            if max_iterations == 0 || deadline.expired() {
                 return Err("Route calculation exceeded time/iteration budget. Try breaking up your journey into smaller segments.".to_string());
             }
 
@@ -149,12 +166,16 @@ async fn do_ship_route(
         }
 
         Err("No valid route found connecting these systems within the maximum jump limit of 14.99 ly.".to_string())
-    }).await.unwrap();
+    }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Route task failed: {}", e)))?;
 
     match result {
         Ok(json) => Ok(Json(json)),
         Err(e) => {
-            let status = if e.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            let status = if e.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             Err((status, e))
         }
     }
@@ -162,14 +183,16 @@ async fn do_ship_route(
 
 pub async fn ship_route_get(
     State(state): State<Arc<AppState>>,
+    Extension(admission): Extension<Admission>,
     Query(params): Query<RouteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    do_ship_route(state, params).await
+    do_ship_route(state, admission, params).await
 }
 
 pub async fn ship_route_post(
     State(state): State<Arc<AppState>>,
+    Extension(admission): Extension<Admission>,
     Json(params): Json<RouteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    do_ship_route(state, params).await
+    do_ship_route(state, admission, params).await
 }

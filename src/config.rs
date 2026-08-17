@@ -22,9 +22,9 @@ pub const EDDN_FLUSH_BATCH_SIZE: usize = 200;
 
 // --- Commander hotspot heatmap ---
 pub const HEATMAP_X_MIN: f64 = -50_000.0;
-pub const HEATMAP_X_MAX: f64 =  50_000.0;
+pub const HEATMAP_X_MAX: f64 = 50_000.0;
 pub const HEATMAP_Z_MIN: f64 = -25_000.0;
-pub const HEATMAP_Z_MAX: f64 =  75_000.0;
+pub const HEATMAP_Z_MAX: f64 = 75_000.0;
 pub const HEATMAP_W: usize = 1024;
 pub const HEATMAP_H: usize = 1024;
 pub const HEATMAP_DECAY_INTERVAL_SECS: u64 = 300;
@@ -32,7 +32,23 @@ pub const HEATMAP_DECAY_FACTOR: f64 = 0.9928057; // ≈8 hour half-life
 pub const HEATMAP_RENDER_CACHE_SECS: u64 = 30;
 
 // --- Routing ---
-pub const CARRIER_REFINE_BUDGET_MS: u128 = 1_800_000; // 30 minutes
+/// A* refinement budget. The whole chain has to fit inside Cloudflare's origin
+/// response cap, because ananke.projectgaltea.org is proxied:
+///
+///   refine budget 80s  <  Caddy read_timeout 95s  <  Cloudflare 100s
+///
+/// Whichever link gives up first discards the greedy fallback result and hands
+/// the caller an error instead, so the budget must be the tightest of the three.
+pub const CARRIER_REFINE_BUDGET_MS: u128 = 80_000;
 pub const CARRIER_JUMP_RANGE: f64 = 500.0;
-pub const NEUTRON_REFINE_BUDGET_MS: u128 = 1_800_000; // 30 minutes
-pub const NEUTRON_SEG_LY: f64 = 2000.0;
+pub const NEUTRON_REFINE_BUDGET_MS: u128 = 80_000;
+
+// --- Admission control ---
+/// Max concurrent heavy (A*/route-solve) requests. On the Deck (4c/8t), 2
+/// means one carrier + one neutron can run simultaneously without thermal
+/// throttling. Excess requests are rejected 503 immediately.
+pub const ADMISSION_HEAVY: usize = 2;
+/// Max concurrent lightweight requests (system lookups, cube search, EDMC
+/// ingest, heatmap, etc). 128 is generous; it's really a safety valve to
+/// stop a scrape flood from exhausting the tokio runtime.
+pub const ADMISSION_LIGHT: usize = 128;

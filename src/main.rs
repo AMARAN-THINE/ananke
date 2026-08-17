@@ -1,10 +1,11 @@
 #![recursion_limit = "256"]
 
+mod admission;
 mod config;
 mod db;
 mod eddn;
-mod heatmap;
 mod handlers;
+mod heatmap;
 mod models;
 mod procgen;
 mod state;
@@ -13,21 +14,34 @@ mod vulkan_astar;
 
 use crossbeam_channel::bounded;
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    middleware,
+    routing::{get, post},
+    Extension, Router,
+};
 
+use admission::Admission;
 use config::*;
-use db::{setup_db_pool, init_db, db_writer_worker};
+use db::{backfill_primary_neutrons, db_writer_worker, init_db, setup_db_pool};
 use eddn::eddn_listener_thread;
 use handlers::neutron_route::NeutronGraph;
-use heatmap::{Heatmap, heatmap_decay_thread, heatmap_png_handler, heatmap_html_handler};
-use state::{AppState, CarrierCache, EdmcStats, EddnStats};
+use heatmap::{heatmap_decay_thread, heatmap_html_handler, heatmap_png_handler, Heatmap};
+use state::{AppState, CarrierCache, EddnStats, EdmcStats};
 use vulkan_astar::VulkanAstar;
+
+/// Route-solve payloads are small JSON blobs.
+const BODY_LIMIT_HEAVY: usize = 256 * 1024;
+/// Read endpoints take query strings, not bodies.
+const BODY_LIMIT_LIGHT: usize = 64 * 1024;
+/// EDMC batch ingest legitimately sends large payloads.
+const BODY_LIMIT_INGEST: usize = 16 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() {
@@ -39,43 +53,97 @@ async fn main() {
     init_db(&conn).unwrap();
     drop(conn);
 
-    // Resident NeutronGraph — built once at startup, but NOT awaited here.
-    // The build scans 3.5M+ rows and computes a CSR edge list, which can
-    // take well over 10 minutes. Blocking server startup on it means the
+    // Resident NeutronGraphs — built once at startup, but NOT awaited here.
+    // The build scans 3.5M+ rows and computes a spatial grid, which can
+    // take well over a minute. Blocking server startup on it means the
     // entire API (every endpoint, not just neutron-route) is unreachable
     // for that whole window on every restart. Instead: start as `None`,
     // bind and serve immediately, and let a background task swap in the
     // real graph once it's ready. /api/neutron-route checks for None and
     // returns 503 until then — everything else works right away.
-    let neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>> =
-        Arc::new(RwLock::new(None));
+    //
+    // Two graphs:
+    //   neutron_graph         — all neutron systems (default)
+    //   primary_neutron_graph — only systems where the neutron star is the
+    //                           arrival star or within ~100 Ls (opt-in)
+    let neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>> = Arc::new(RwLock::new(None));
+    let primary_neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>> = Arc::new(RwLock::new(None));
     {
         let neutron_graph_for_task = neutron_graph.clone();
+        let primary_graph_for_task = primary_neutron_graph.clone();
         let pool_for_graph = pool.clone();
         tokio::spawn(async move {
-            info!("Initializing resident NeutronGraph (background)...");
-            let build_result = tokio::task::spawn_blocking(move || -> Result<NeutronGraph, String> {
-                let conn = pool_for_graph.get().map_err(|e| e.to_string())?;
-                NeutronGraph::build(&conn)
-            }).await;
+            info!("Initializing resident NeutronGraphs (background)...");
 
-            match build_result {
-                Ok(Ok(graph)) => {
-                    let mut guard = neutron_graph_for_task.write().await;
-                    *guard = Some(Arc::new(graph));
-                    info!("Resident NeutronGraph ready — /api/neutron-route is now live.");
+            // ── Full graph: built and published on its own, so the primary
+            // build never holds /api/neutron-route in 503 behind it.
+            let pool_full = pool_for_graph.clone();
+            let full_result = tokio::task::spawn_blocking(move || -> Result<NeutronGraph, String> {
+                let conn = pool_full.get().map_err(|e| e.to_string())?;
+                NeutronGraph::build(&conn, "neutron_systems")
+            })
+            .await;
+
+            match full_result {
+                Ok(Ok(full_graph)) => {
+                    let nodes = full_graph.len();
+                    {
+                        let mut guard = neutron_graph_for_task.write().await;
+                        *guard = Some(Arc::new(full_graph));
+                    }
+                    info!(
+                        "Full NeutronGraph ready — {} nodes. /api/neutron-route is now live.",
+                        nodes
+                    );
                 }
                 Ok(Err(e)) => {
-                    error!("Failed to build resident NeutronGraph: {}. /api/neutron-route will keep returning 503.", e);
+                    error!("Failed to build full NeutronGraph: {}. /api/neutron-route will keep returning 503.", e);
                 }
                 Err(e) => {
-                    error!("NeutronGraph build task panicked: {}. /api/neutron-route will keep returning 503.", e);
+                    error!("Full NeutronGraph build task panicked: {}. /api/neutron-route will keep returning 503.", e);
+                }
+            }
+
+            // ── Backfill, then the primary-only graph. The backfill lives
+            // here rather than in init_db: it is a full scan of `bodies` and
+            // it reads a column that init_db's migration loop adds, so it
+            // must run after init_db and off the startup path.
+            let pool_primary = pool_for_graph.clone();
+            let primary_result =
+                tokio::task::spawn_blocking(move || -> Result<NeutronGraph, String> {
+                    let conn = pool_primary.get().map_err(|e| e.to_string())?;
+                    backfill_primary_neutrons(&conn)
+                        .map_err(|e| format!("primary neutron backfill failed: {}", e))?;
+                    NeutronGraph::build(&conn, "primary_neutron_systems")
+                })
+                .await;
+
+            match primary_result {
+                Ok(Ok(prim_graph)) => {
+                    let nodes = prim_graph.len();
+                    {
+                        let mut guard = primary_graph_for_task.write().await;
+                        *guard = Some(Arc::new(prim_graph));
+                    }
+                    if nodes == 0 {
+                        warn!("Primary NeutronGraph built with 0 nodes — primary_neutron_systems is empty. primary_only requests will fall back to the full graph.");
+                    } else {
+                        info!("Primary NeutronGraph ready — {} nodes.", nodes);
+                    }
+                }
+                Ok(Err(e)) => {
+                    error!("Failed to build primary NeutronGraph: {}. primary_only requests will fall back to the full graph.", e);
+                }
+                Err(e) => {
+                    error!("Primary NeutronGraph build task panicked: {}. primary_only requests will fall back to the full graph.", e);
                 }
             }
         });
     }
 
-    tokio::spawn(async { sync::sync_manager().await; });
+    tokio::spawn(async {
+        sync::sync_manager().await;
+    });
 
     // EDMC live-ingest writer
     let (edmc_sender, edmc_receiver) = bounded::<Vec<models::SpanshSystem>>(100);
@@ -91,15 +159,15 @@ async fn main() {
 
     // EDDN stats
     let eddn_stats = Arc::new(EddnStats {
-        messages_received:  AtomicU64::new(0),
+        messages_received: AtomicU64::new(0),
         messages_processed: AtomicU64::new(0),
-        messages_dropped:   AtomicU64::new(0),
-        systems_emitted:    AtomicU64::new(0),
-        bodies_emitted:     AtomicU64::new(0),
-        stations_emitted:   AtomicU64::new(0),
-        last_message_time:  AtomicU64::new(0),
-        reconnects:         AtomicU64::new(0),
-        connected:          AtomicU64::new(0),
+        messages_dropped: AtomicU64::new(0),
+        systems_emitted: AtomicU64::new(0),
+        bodies_emitted: AtomicU64::new(0),
+        stations_emitted: AtomicU64::new(0),
+        last_message_time: AtomicU64::new(0),
+        reconnects: AtomicU64::new(0),
+        connected: AtomicU64::new(0),
     });
 
     // Heatmap
@@ -114,7 +182,8 @@ async fn main() {
     }
 
     // EDDN listener
-    let eddn_disabled = std::env::var(EDDN_DISABLE_ENV).ok()
+    let eddn_disabled = std::env::var(EDDN_DISABLE_ENV)
+        .ok()
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     if eddn_disabled {
@@ -129,7 +198,9 @@ async fn main() {
         let eddn_heatmap = heatmap.clone();
         let _eddn_listener = std::thread::Builder::new()
             .name("eddn-listener".into())
-            .spawn(move || eddn_listener_thread(relay_url, eddn_sender, eddn_stats_for_thread, eddn_heatmap))
+            .spawn(move || {
+                eddn_listener_thread(relay_url, eddn_sender, eddn_stats_for_thread, eddn_heatmap)
+            })
             .expect("failed to spawn EDDN listener thread");
         info!("EDDN listener thread started.");
     }
@@ -144,7 +215,10 @@ async fn main() {
         db_pool: pool,
         query_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
         astar_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_ASTAR)),
-        carrier_cache: Mutex::new(CarrierCache { data: None, expires_at: 0 }),
+        carrier_cache: Mutex::new(CarrierCache {
+            data: None,
+            expires_at: 0,
+        }),
         bubble_cache: Mutex::new(HashMap::new()),
         edmc_sender,
         edmc_api_key,
@@ -158,41 +232,153 @@ async fn main() {
         heatmap,
         vulkan_astar,
         neutron_graph,
+        primary_neutron_graph,
     });
 
     let cors = CorsLayer::permissive();
+    let admission = Admission::new(ADMISSION_HEAVY, ADMISSION_LIGHT);
+    info!(
+        "Admission control: {} heavy slots, {} light slots",
+        ADMISSION_HEAVY, ADMISSION_LIGHT
+    );
 
-    let app = Router::new()
+    // ── Heavy routes: CPU-bound A*/route solves ──────────────────────────
+    // No middleware guard here on purpose. The handlers claim their own
+    // HeavySlot from the Admission handle supplied by this Extension layer,
+    // so the semaphore permit can be moved into spawn_blocking and held for
+    // the real duration of the solve. A middleware guard would draw on the
+    // same semaphore a second time and halve effective concurrency.
+    let heavy_routes = Router::new()
+        .route(
+            "/api/route",
+            get(handlers::ship_route::ship_route_get).post(handlers::ship_route::ship_route_post),
+        )
+        .route(
+            "/api/carrier-route",
+            post(handlers::carrier_route::carrier_route_post),
+        )
+        .route(
+            "/api/neutron-route",
+            post(handlers::neutron_route::neutron_route_post),
+        )
+        .layer(Extension(admission.clone()))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_HEAVY))
+        .with_state(app_state.clone());
+
+    // ── Ingest routes: EDMC writes ───────────────────────────────────────
+    // Separated purely so batch ingest keeps a large body limit while every
+    // other endpoint gets a tight one.
+    let ingest_routes = Router::new()
+        .route("/api/edmc/journal", post(handlers::edmc::edmc_journal))
+        .route("/api/edmc/batch", post(handlers::edmc::edmc_batch))
+        .layer(middleware::from_fn_with_state(
+            admission.clone(),
+            admission::light_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_INGEST))
+        .with_state(app_state.clone());
+
+    // ── Light routes: everything else ────────────────────────────────────
+    // The light_guard stops a scrape/crawl flood from exhausting the tokio
+    // runtime, but with 128 slots it's invisible to normal traffic.
+    let light_routes = Router::new()
         // System data
         .route("/api/system", get(handlers::system::get_system))
-        .route("/api/system/estimate", get(handlers::procgen::estimate_system))
-        .route("/api/system/bodies", get(handlers::system::get_system_bodies))
+        .route(
+            "/api/system/estimate",
+            get(handlers::procgen::estimate_system),
+        )
+        .route(
+            "/api/system/bodies",
+            get(handlers::system::get_system_bodies),
+        )
         .route("/api/bodies", get(handlers::system::get_system_bodies))
-        .route("/api/system/stations", get(handlers::system::get_system_stations))
+        .route(
+            "/api/system/stations",
+            get(handlers::system::get_system_stations),
+        )
         .route("/api/stations", get(handlers::system::get_system_stations))
         .route("/api/distance", get(handlers::system::get_distance))
         // Station search
-        .route("/api/nearest-station", get(handlers::station::nearest_station))
+        .route(
+            "/api/nearest-station",
+            get(handlers::station::nearest_station),
+        )
         // Cube search
-        .route("/api/cube-search", get(handlers::search::cube_search_get).post(handlers::search::cube_search_post))
-        // Routing
-        .route("/api/route", get(handlers::ship_route::ship_route_get).post(handlers::ship_route::ship_route_post))
-        .route("/api/carrier-route", post(handlers::carrier_route::carrier_route_post))
-        .route("/api/neutron-route", post(handlers::neutron_route::neutron_route_post))
+        .route(
+            "/api/cube-search",
+            get(handlers::search::cube_search_get).post(handlers::search::cube_search_post),
+        )
         // Progression
-        .route("/api/galtea-progression", get(handlers::progression::get_carrier_progression))
-        .route("/api/bubble-progress", get(handlers::bubble::get_bubble_progress))
-        // EDMC ingest
-        .route("/api/edmc/journal", post(handlers::edmc::edmc_journal))
-        .route("/api/edmc/batch", post(handlers::edmc::edmc_batch))
+        .route(
+            "/api/galtea-progression",
+            get(handlers::progression::get_carrier_progression),
+        )
+        .route(
+            "/api/bubble-progress",
+            get(handlers::bubble::get_bubble_progress),
+        )
+        // EDMC stats (read-only, small)
         .route("/api/edmc/stats", get(handlers::edmc::edmc_stats))
         // Heatmap
         .route("/api/heatmap.png", get(heatmap_png_handler))
         .route("/heatmap", get(heatmap_html_handler))
-        .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            admission,
+            admission::light_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_LIGHT))
         .with_state(app_state);
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT)).await.unwrap();
-    info!("Server listening on port {}", PORT);
-    axum::serve(listener, app).await.unwrap();
+    let app = Router::new()
+        .merge(heavy_routes)
+        .merge(ingest_routes)
+        .merge(light_routes)
+        .layer(cors);
+
+    // Bind address is env-driven so the service can be pinned to the tailnet
+    // interface instead of every interface on the Deck. Set ANANKE_BIND to
+    // the Deck's 100.x.x.x tailscale address in the systemd unit.
+    let bind_host = std::env::var("ANANKE_BIND")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+    if bind_host == "0.0.0.0" {
+        warn!("Binding to 0.0.0.0 — Ananke is reachable from the whole LAN. Set ANANKE_BIND to the tailscale address to restrict it.");
+    }
+
+    let listener = TcpListener::bind(format!("{}:{}", bind_host, PORT))
+        .await
+        .unwrap();
+    info!("Server listening on {}:{}", bind_host, PORT);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl-c handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+
+    info!("Shutdown signal received — draining connections.");
 }

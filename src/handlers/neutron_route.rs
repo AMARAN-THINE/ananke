@@ -1,15 +1,21 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::admission::{overloaded_tuple, Admission, CancelOnDrop, Deadline};
 use crate::config::NEUTRON_REFINE_BUDGET_MS as REFINE_BUDGET_MS;
 use crate::models::NeutronRouteQuery;
 use crate::state::AppState;
+
+/// Wall-clock ceiling for the greedy phase and the entry-bridge walk. Both are
+/// DB-query-per-iteration loops with only an iteration cap, so without a clock
+/// they can outlive any sensible request.
+const NEUTRON_GREEDY_BUDGET_MS: u128 = 60_000;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Persistent NeutronGraph — resident nodes + spatial grid only.
@@ -66,8 +72,13 @@ pub struct NeutronGraph {
 impl NeutronGraph {
     /// Builds the resident graph from the SQLite database. Call this ONCE at
     /// startup. No edge precompute: just node coordinates + the spatial grid.
-    pub fn build(conn: &rusqlite::Connection) -> Result<Self, String> {
-        info!("Building resident NeutronGraph (nodes + spatial grid)...");
+    /// `table` selects the source table: "neutron_systems" for all neutrons,
+    /// "primary_neutron_systems" for only primary/near-arrival neutrons.
+    pub fn build(conn: &rusqlite::Connection, table: &str) -> Result<Self, String> {
+        info!(
+            "Building resident NeutronGraph from {} (nodes + spatial grid)...",
+            table
+        );
         let t_start = Instant::now();
 
         let mut x = Vec::new();
@@ -77,13 +88,13 @@ impl NeutronGraph {
         let mut id_map = HashMap::new();
         let mut vk_nodes = Vec::new();
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT ns.systemId64, i.minX, i.minY, i.minZ \
-                 FROM neutron_systems ns \
-                 JOIN systems_index i ON ns.systemId64 = i.id",
-            )
-            .map_err(|e| e.to_string())?;
+        let sql = format!(
+            "SELECT ns.systemId64, i.minX, i.minY, i.minZ \
+             FROM {} ns \
+             JOIN systems_index i ON ns.systemId64 = i.id",
+            table
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
         let rows = stmt
             .query_map([], |r| {
@@ -289,41 +300,78 @@ fn get_node(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Graph selection
+//
+// Falls back to the full graph when the primary-only graph is missing OR
+// empty. An empty primary graph is not a valid graph to route against: every
+// collect_neighbors call returns nothing, so greedy degrades to a normal-star
+// walk that burns the full 60s budget and then reports the destination as
+// unreachable. Serving an unfiltered route with a warning is strictly better
+// than serving no route at all.
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn select_graph(
+    state: &Arc<AppState>,
+    primary_only: bool,
+) -> Result<Arc<NeutronGraph>, (StatusCode, String)> {
+    if primary_only {
+        let primary = { state.primary_neutron_graph.read().await.as_ref().cloned() };
+        match primary {
+            Some(g) if g.len() > 0 => return Ok(g),
+            Some(_) => warn!(
+                "primary_only requested but the primary neutron graph has 0 nodes — falling \
+                 back to the full graph. Check the primary_neutron_systems backfill."
+            ),
+            None => warn!(
+                "primary_only requested but the primary neutron graph has not finished \
+                 building — falling back to the full graph."
+            ),
+        }
+    }
+
+    let full = { state.neutron_graph.read().await.as_ref().cloned() };
+    full.ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Resident neutron graph is still building at startup — try again shortly.".into(),
+        )
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Main router
 // ═══════════════════════════════════════════════════════════════════════════
 
 async fn do_neutron_route(
     state: Arc<AppState>,
+    admission: Admission,
     params: NeutronRouteQuery,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.astar_semaphore.acquire().await.map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Server overloaded — A* queue full".into(),
-        )
-    })?;
+    // Claim a heavy slot up front. The permit is moved into the blocking task
+    // below, so the slot stays held for the real duration of the solve rather
+    // than the lifetime of the connection.
+    let slot = admission.try_heavy().ok_or_else(overloaded_tuple)?;
+    let (permit, cancel) = slot.split();
+
+    // Dropped when this future is dropped, i.e. when the client disconnects.
+    // That flips the flag every solver loop below polls.
+    let _disconnect_guard = CancelOnDrop::new(cancel.clone());
 
     let pool = state.db_pool.clone();
-    let graph = {
-        let guard = state.neutron_graph.read().await;
-        match guard.as_ref() {
-            Some(g) => g.clone(),
-            None => {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Resident neutron graph is still building at startup — try again shortly.".into(),
-                ));
-            }
-        }
-    };
+    let graph = select_graph(&state, params.primary_only).await?;
 
     let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let _permit = permit;
         let conn = pool.get().map_err(|e| e.to_string())?;
         let t_start = Instant::now();
+        let greedy_deadline = Deadline::new(NEUTRON_GREEDY_BUDGET_MS, cancel.clone());
+        let astar_deadline = Deadline::new(REFINE_BUDGET_MS, cancel.clone());
 
         // ── Resolve source / destination ─────────────────────────────────────
-        let (src_id, _src_name, x1, y1, z1) = crate::procgen::resolve_system(&conn, &params.source)?;
-        let (dst_id, _dst_name, x2, y2, z2) = crate::procgen::resolve_system(&conn, &params.destination)?;
+        let (src_id, _src_name, x1, y1, z1) =
+            crate::procgen::resolve_system(&conn, &params.source)?;
+        let (dst_id, _dst_name, x2, y2, z2) =
+            crate::procgen::resolve_system(&conn, &params.destination)?;
 
         let total_distance = dist_sq(x1, y1, z1, x2, y2, z2).sqrt();
         let multiplier = if params.supercharge_type.to_lowercase() == "caspian" {
@@ -352,7 +400,11 @@ async fn do_neutron_route(
         }
 
         // ── Determine the route ──────────────────────────────────────────────
-        let src_range = if src_is_neutron { boosted_range } else { base_range };
+        let src_range = if src_is_neutron {
+            boosted_range
+        } else {
+            base_range
+        };
 
         let final_path: Vec<i64>;
         let mut is_optimal = false;
@@ -379,10 +431,15 @@ async fn do_neutron_route(
                 &mut normal_nodes,
                 src_id,
                 dst_id,
-                x1, y1, z1,
-                x2, y2, z2,
+                x1,
+                y1,
+                z1,
+                x2,
+                y2,
+                z2,
                 base_range,
                 boosted_range,
+                &greedy_deadline,
             );
             let greedy_jumps = greedy_path.as_ref().map(|p| (p.len() - 1) as u32);
             let mu_init = greedy_jumps.unwrap_or(u32::MAX);
@@ -394,19 +451,23 @@ async fn do_neutron_route(
             );
 
             // ── Phase 2: A* with wide-radius entry seeding ───────────────────
-            let use_astar =
-                params.engine.as_deref().unwrap_or("astar").to_lowercase() != "greedy";
+            let use_astar = params.engine.as_deref().unwrap_or("astar").to_lowercase() != "greedy";
 
             let astar_result = if use_astar {
                 astar_min_hop(
                     &graph,
-                    src_id, dst_id,
-                    x1, y1, z1,
-                    x2, y2, z2,
+                    src_id,
+                    dst_id,
+                    x1,
+                    y1,
+                    z1,
+                    x2,
+                    y2,
+                    z2,
                     base_range,
                     boosted_range,
                     mu_init,
-                    &t_start,
+                    &astar_deadline,
                 )
             } else {
                 None
@@ -445,10 +506,17 @@ async fn do_neutron_route(
                         &graph,
                         &mut normal_stmt,
                         &mut normal_nodes,
-                        src_id, x1, y1, z1,
-                        entry_id, ex, ey, ez,
+                        src_id,
+                        x1,
+                        y1,
+                        z1,
+                        entry_id,
+                        ex,
+                        ey,
+                        ez,
                         base_range,
                         boosted_range,
+                        &greedy_deadline,
                     ) {
                         Some(bridge) => bridge,
                         None => {
@@ -480,7 +548,9 @@ async fn do_neutron_route(
                 let assembled_jumps = (full_path.len() - 1) as u32;
                 info!(
                     "A* assembled: {} jumps (bridge={}, chain={}) in {}ms",
-                    assembled_jumps, bridge_hops, chain_hops,
+                    assembled_jumps,
+                    bridge_hops,
+                    chain_hops,
                     t_start.elapsed().as_millis()
                 );
 
@@ -569,7 +639,12 @@ async fn do_neutron_route(
         }))
     })
     .await
-    .unwrap()
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Route task failed: {}", e),
+        )
+    })?
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     Ok(Json(result))
@@ -610,7 +685,7 @@ fn astar_min_hop(
     base_range: f64,
     boosted_range: f64,
     mu_init: u32,
-    t_start: &Instant,
+    deadline: &Deadline,
 ) -> Option<Vec<i64>> {
     let n = graph.len();
     let goal = n as u32;
@@ -675,12 +750,15 @@ fn astar_min_hop(
                 seed_count += 1;
             }
         }
-        info!("A* seeded {} entry neutrons within {:.0} LY", seed_count, entry_radius);
+        info!(
+            "A* seeded {} entry neutrons within {:.0} LY",
+            seed_count, entry_radius
+        );
     }
 
     // ── Main loop ────────────────────────────────────────────────────────────
     while let Some(node) = open.pop() {
-        if t_start.elapsed().as_millis() > REFINE_BUDGET_MS {
+        if deadline.should_stop() {
             break;
         }
         let idx = node.idx;
@@ -807,12 +885,13 @@ fn bridge_to_neutron(
     sx: f64,
     sy: f64,
     sz: f64,
-    target_id: i64,
+    _target_id: i64,
     tx: f64,
     ty: f64,
     tz: f64,
     base_range: f64,
     boosted_range: f64,
+    deadline: &Deadline,
 ) -> Option<Vec<i64>> {
     let mut path = vec![src_id];
     let mut visited: HashSet<i64> = HashSet::new();
@@ -823,7 +902,14 @@ fn bridge_to_neutron(
     let mut nbr: Vec<u32> = Vec::with_capacity(256);
 
     for _ in 0..500usize {
-        let cur_range = if cur_is_neutron { boosted_range } else { base_range };
+        if deadline.should_stop() {
+            return None;
+        }
+        let cur_range = if cur_is_neutron {
+            boosted_range
+        } else {
+            base_range
+        };
         let d_target = dist_sq(cx, cy, cz, tx, ty, tz).sqrt();
 
         // Can we reach the target directly?
@@ -877,7 +963,9 @@ fn bridge_to_neutron(
             &mut cx,
             &mut cy,
             &mut cz,
-            tx, ty, tz,
+            tx,
+            ty,
+            tz,
             cur_range,
         )
         .ok()?;
@@ -982,6 +1070,7 @@ fn greedy_route(
     dz: f64,
     base_range: f64,
     boosted_range: f64,
+    deadline: &Deadline,
 ) -> Option<Vec<i64>> {
     let mut path = vec![src_id];
     let mut visited: HashSet<i64> = HashSet::new();
@@ -992,7 +1081,14 @@ fn greedy_route(
     let mut nbr: Vec<u32> = Vec::with_capacity(256);
 
     for _ in 0..200_000usize {
-        let cur_range = if cur_is_neutron { boosted_range } else { base_range };
+        if deadline.should_stop() {
+            return None;
+        }
+        let cur_range = if cur_is_neutron {
+            boosted_range
+        } else {
+            base_range
+        };
         let d_dst = dist_sq(cx, cy, cz, dx, dy, dz).sqrt();
         if d_dst <= cur_range {
             path.push(dst_id);
@@ -1060,7 +1156,7 @@ fn greedy_route(
 // Batch DB Resolution
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn batch_resolve_names(
+pub(crate) fn batch_resolve_names(
     conn: &rusqlite::Connection,
     path: &[i64],
 ) -> Result<HashMap<i64, String>, String> {
@@ -1068,13 +1164,14 @@ fn batch_resolve_names(
 
     for chunk in path.chunks(500) {
         let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id64, name FROM systems WHERE id64 IN ({})", placeholders);
+        let sql = format!(
+            "SELECT id64, name FROM systems WHERE id64 IN ({})",
+            placeholders
+        );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
-        let params: Vec<&dyn rusqlite::ToSql> = chunk
-            .iter()
-            .map(|id| id as &dyn rusqlite::ToSql)
-            .collect();
+        let params: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
 
         let rows = stmt
             .query_map(params.as_slice(), |r| {
@@ -1097,7 +1194,8 @@ fn batch_resolve_names(
 
 pub async fn neutron_route_post(
     State(state): State<Arc<AppState>>,
+    Extension(admission): Extension<Admission>,
     Json(params): Json<NeutronRouteQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    do_neutron_route(state, params).await
+    do_neutron_route(state, admission, params).await
 }
