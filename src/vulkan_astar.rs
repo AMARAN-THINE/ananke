@@ -1,3 +1,4 @@
+use crate::admission::Deadline;
 /// vulkan_astar.rs — GPU-accelerated A* for Ananke carrier/neutron routing
 ///
 /// Architecture
@@ -42,17 +43,14 @@
 ///
 /// Batch vectors are allocated once outside the main loop and reused via
 /// clear() to avoid per-iteration allocation.
-
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::{info, warn};
 
 use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder,
-        CommandBufferUsage,
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator,
@@ -63,8 +61,7 @@ use vulkano::{
         PersistentDescriptorSet, WriteDescriptorSet,
     },
     device::{
-        physical::PhysicalDeviceType, Device, DeviceCreateInfo, Queue, QueueCreateInfo,
-        QueueFlags,
+        physical::PhysicalDeviceType, Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
     },
     instance::{Instance, InstanceCreateInfo},
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
@@ -86,7 +83,9 @@ use vulkano::{
 #[derive(Clone, Copy, BufferContents)]
 #[repr(C)]
 struct GpuNode {
-    x: f32, y: f32, z: f32,
+    x: f32,
+    y: f32,
+    z: f32,
     _pad: f32,
 }
 
@@ -95,10 +94,12 @@ struct GpuNode {
 #[derive(Clone, Copy, BufferContents)]
 #[repr(C)]
 struct GpuVoxelSlot {
-    cx: i32, cy: i32, cz: i32,
-    offset: u32,    // index into flat voxel_node_idx[]
-    count:  u32,    // number of node indices in this cell
-    _pad:   u32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    offset: u32, // index into flat voxel_node_idx[]
+    count: u32,  // number of node indices in this cell
+    _pad: u32,
 }
 
 /// One entry in the frontier passed to the GPU each iteration.
@@ -106,7 +107,7 @@ struct GpuVoxelSlot {
 #[repr(C)]
 struct GpuFrontierNode {
     node_idx: u32,
-    g:        u32,
+    g: u32,
 }
 
 /// One relaxation candidate emitted by the GPU.
@@ -114,16 +115,16 @@ struct GpuFrontierNode {
 #[repr(C)]
 pub struct GpuRelaxation {
     pub from_idx: u32,
-    pub to_idx:   u32,
-    pub new_g:    u32,
-    _pad:         u32,
+    pub to_idx: u32,
+    pub new_g: u32,
+    _pad: u32,
 }
 
 /// Atomic output counter + overflow flag.
 #[derive(Clone, Copy, BufferContents)]
 #[repr(C)]
 struct GpuCounter {
-    count:    u32,
+    count: u32,
     overflow: u32,
 }
 
@@ -132,16 +133,16 @@ struct GpuCounter {
 #[derive(Clone, Copy, BufferContents)]
 #[repr(C)]
 struct PushConstants {
-    frontier_size:        u32,
-    mu:                   u32,   // upper bound (greedy_jumps); GPU prunes paths ≥ mu
-    jump_range_sq:        f32,
-    cell_size:            f32,
-    dst_x:                f32,
-    dst_y:                f32,
-    dst_z:                f32,
-    dst_node_idx:         u32,
-    table_mask:           u32,   // power-of-2 table size − 1
-    max_total_relaxations: u32,  // capacity of the relaxation output buffer
+    frontier_size: u32,
+    mu: u32, // upper bound (greedy_jumps); GPU prunes paths ≥ mu
+    jump_range_sq: f32,
+    cell_size: f32,
+    dst_x: f32,
+    dst_y: f32,
+    dst_z: f32,
+    dst_node_idx: u32,
+    table_mask: u32,            // power-of-2 table size − 1
+    max_total_relaxations: u32, // capacity of the relaxation output buffer
 }
 
 // ─── Inline GLSL compute shader ───────────────────────────────────────────────
@@ -269,7 +270,7 @@ void main() {
 // ─── GpuGraph — corridor data uploaded once per route request ────────────────
 
 pub struct GpuGraph {
-    node_buf:    Subbuffer<[GpuNode]>,
+    node_buf: Subbuffer<[GpuNode]>,
     voxel_table: Subbuffer<[GpuVoxelSlot]>,
     voxel_nodes: Subbuffer<[u32]>,
 
@@ -277,34 +278,34 @@ pub struct GpuGraph {
     pub id_to_idx: HashMap<i64, u32>,
     pub idx_to_id: Vec<i64>,
     /// f32 positions kept CPU-side for heuristic evaluation without GPU readback.
-    pub node_pos:  Vec<(f32, f32, f32)>,
+    pub node_pos: Vec<(f32, f32, f32)>,
 
-    pub cell_size:   f32,
-    pub table_mask:  u32,
-    pub node_count:  usize,
+    pub cell_size: f32,
+    pub table_mask: u32,
+    pub node_count: usize,
 }
 
 // ─── VulkanAstar ─────────────────────────────────────────────────────────────
 
 pub struct VulkanAstar {
-    device:    Arc<Device>,
-    queue:     Arc<Queue>,
-    pipeline:  Arc<ComputePipeline>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    pipeline: Arc<ComputePipeline>,
     mem_alloc: Arc<StandardMemoryAllocator>,
     cmd_alloc: StandardCommandBufferAllocator,
-    ds_alloc:  StandardDescriptorSetAllocator,
+    ds_alloc: StandardDescriptorSetAllocator,
 
     // Pre-allocated buffers reused across dispatch_frontier calls to avoid
     // per-iteration allocator churn. Sized to max capacity at init time.
     frontier_buf: Subbuffer<[GpuFrontierNode]>,
-    relax_buf:    Subbuffer<[GpuRelaxation]>,
-    counter_buf:  Subbuffer<GpuCounter>,
+    relax_buf: Subbuffer<[GpuRelaxation]>,
+    counter_buf: Subbuffer<GpuCounter>,
 }
 
 /// Frontier nodes drained per GPU dispatch. 512 = 8 workgroups of 64 on RDNA2.
 /// Each emits up to MAX_RELAX_PER_NODE candidates → output buf = 512 × 512 × 16B = 4 MB.
-const BATCH_SIZE:          u32 = 512;
-const MAX_RELAX_PER_NODE:  u32 = 512;
+const BATCH_SIZE: u32 = 512;
+const MAX_RELAX_PER_NODE: u32 = 512;
 
 /// Sentinel for "no value" in flat g_score / came_from arrays.
 const SENTINEL: u32 = u32::MAX;
@@ -315,45 +316,57 @@ impl VulkanAstar {
     /// Returns None if Vulkan is unavailable (process falls back to CPU A*).
     pub fn init() -> Option<Arc<Self>> {
         let lib = VulkanLibrary::new()
-            .map_err(|e| warn!("Vulkan library unavailable: {e}")).ok()?;
+            .map_err(|e| warn!("Vulkan library unavailable: {e}"))
+            .ok()?;
 
         let instance = Instance::new(lib, InstanceCreateInfo::default())
-            .map_err(|e| warn!("Vulkan instance: {e}")).ok()?;
+            .map_err(|e| warn!("Vulkan instance: {e}"))
+            .ok()?;
 
         // Pick best compute-capable device (prefer discrete > integrated).
         let (phys, qfi) = instance
             .enumerate_physical_devices()
-            .map_err(|e| warn!("Enumerate physical devices: {e}")).ok()?
+            .map_err(|e| warn!("Enumerate physical devices: {e}"))
+            .ok()?
             .filter_map(|p| {
-                let qfi = p.queue_family_properties()
-                    .iter().enumerate()
+                let qfi = p
+                    .queue_family_properties()
+                    .iter()
+                    .enumerate()
                     .find(|(_, q)| q.queue_flags.contains(QueueFlags::COMPUTE))
                     .map(|(i, _)| i as u32)?;
                 Some((p, qfi))
             })
             .min_by_key(|(p, _)| match p.properties().device_type {
-                PhysicalDeviceType::DiscreteGpu   => 0,
+                PhysicalDeviceType::DiscreteGpu => 0,
                 PhysicalDeviceType::IntegratedGpu => 1,
-                PhysicalDeviceType::VirtualGpu    => 2,
-                _                                 => 3,
+                PhysicalDeviceType::VirtualGpu => 2,
+                _ => 3,
             })?;
 
-        info!("VulkanAstar: {:?} — {}",
+        info!(
+            "VulkanAstar: {:?} — {}",
             phys.properties().device_type,
-            phys.properties().device_name);
+            phys.properties().device_name
+        );
 
-        let (device, mut queues) = Device::new(phys, DeviceCreateInfo {
-            queue_create_infos: vec![QueueCreateInfo {
-                queue_family_index: qfi,
+        let (device, mut queues) = Device::new(
+            phys,
+            DeviceCreateInfo {
+                queue_create_infos: vec![QueueCreateInfo {
+                    queue_family_index: qfi,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }).map_err(|e| warn!("Vulkan device: {e}")).ok()?;
+            },
+        )
+        .map_err(|e| warn!("Vulkan device: {e}"))
+        .ok()?;
 
-        let queue     = queues.next()?;
+        let queue = queues.next()?;
         let mem_alloc = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
         let cmd_alloc = StandardCommandBufferAllocator::new(device.clone(), Default::default());
-        let ds_alloc  = StandardDescriptorSetAllocator::new(device.clone(), Default::default());
+        let ds_alloc = StandardDescriptorSetAllocator::new(device.clone(), Default::default());
 
         let pipeline = Self::build_pipeline(device.clone())?;
 
@@ -361,74 +374,120 @@ impl VulkanAstar {
         // dispatch_frontier never touches the allocator.
         let frontier_buf: Subbuffer<[GpuFrontierNode]> = Buffer::new_slice(
             mem_alloc.clone(),
-            BufferCreateInfo { usage: BufferUsage::STORAGE_BUFFER, ..Default::default() },
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_HOST
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             BATCH_SIZE as u64,
-        ).map_err(|e| warn!("frontier_buf alloc: {e}")).ok()?;
+        )
+        .map_err(|e| warn!("frontier_buf alloc: {e}"))
+        .ok()?;
 
         let relax_buf: Subbuffer<[GpuRelaxation]> = Buffer::new_slice(
             mem_alloc.clone(),
-            BufferCreateInfo { usage: BufferUsage::STORAGE_BUFFER, ..Default::default() },
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_HOST
                     | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                 ..Default::default()
             },
             (BATCH_SIZE * MAX_RELAX_PER_NODE) as u64,
-        ).map_err(|e| warn!("relax_buf alloc: {e}")).ok()?;
+        )
+        .map_err(|e| warn!("relax_buf alloc: {e}"))
+        .ok()?;
 
         let counter_buf: Subbuffer<GpuCounter> = Buffer::from_data(
             mem_alloc.clone(),
-            BufferCreateInfo { usage: BufferUsage::STORAGE_BUFFER, ..Default::default() },
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_HOST
                     | MemoryTypeFilter::HOST_RANDOM_ACCESS,
                 ..Default::default()
             },
-            GpuCounter { count: 0, overflow: 0 },
-        ).map_err(|e| warn!("counter_buf alloc: {e}")).ok()?;
+            GpuCounter {
+                count: 0,
+                overflow: 0,
+            },
+        )
+        .map_err(|e| warn!("counter_buf alloc: {e}"))
+        .ok()?;
 
         Some(Arc::new(Self {
-            device, queue, pipeline, mem_alloc, cmd_alloc, ds_alloc,
-            frontier_buf, relax_buf, counter_buf,
+            device,
+            queue,
+            pipeline,
+            mem_alloc,
+            cmd_alloc,
+            ds_alloc,
+            frontier_buf,
+            relax_buf,
+            counter_buf,
         }))
     }
 
     fn build_pipeline(device: Arc<Device>) -> Option<Arc<ComputePipeline>> {
         let shader = cs::load(device.clone())
-            .map_err(|e| warn!("Shader compile: {e}")).ok()?;
-        let entry  = shader.entry_point("main")?;
-        let stage  = PipelineShaderStageCreateInfo::new(entry);
+            .map_err(|e| warn!("Shader compile: {e}"))
+            .ok()?;
+        let entry = shader.entry_point("main")?;
+        let stage = PipelineShaderStageCreateInfo::new(entry);
 
         // 6 storage buffer bindings
         let bindings = (0u32..6)
-            .map(|b| (b, DescriptorSetLayoutBinding {
-                stages: ShaderStages::COMPUTE,
-                ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
-            }))
+            .map(|b| {
+                (
+                    b,
+                    DescriptorSetLayoutBinding {
+                        stages: ShaderStages::COMPUTE,
+                        ..DescriptorSetLayoutBinding::descriptor_type(DescriptorType::StorageBuffer)
+                    },
+                )
+            })
             .collect();
 
-        let ds_layout = DescriptorSetLayout::new(device.clone(),
-            DescriptorSetLayoutCreateInfo { bindings, ..Default::default() })
-            .map_err(|e| warn!("DS layout: {e}")).ok()?;
+        let ds_layout = DescriptorSetLayout::new(
+            device.clone(),
+            DescriptorSetLayoutCreateInfo {
+                bindings,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| warn!("DS layout: {e}"))
+        .ok()?;
 
-        let layout = PipelineLayout::new(device.clone(), PipelineLayoutCreateInfo {
-            set_layouts: vec![ds_layout],
-            push_constant_ranges: vec![PushConstantRange {
-                stages: ShaderStages::COMPUTE,
-                offset: 0,
-                size: std::mem::size_of::<PushConstants>() as u32,
-            }],
-            ..Default::default()
-        }).map_err(|e| warn!("Pipeline layout: {e}")).ok()?;
+        let layout = PipelineLayout::new(
+            device.clone(),
+            PipelineLayoutCreateInfo {
+                set_layouts: vec![ds_layout],
+                push_constant_ranges: vec![PushConstantRange {
+                    stages: ShaderStages::COMPUTE,
+                    offset: 0,
+                    size: std::mem::size_of::<PushConstants>() as u32,
+                }],
+                ..Default::default()
+            },
+        )
+        .map_err(|e| warn!("Pipeline layout: {e}"))
+        .ok()?;
 
-        ComputePipeline::new(device, None,
-            ComputePipelineCreateInfo::stage_layout(stage, layout))
-            .map_err(|e| warn!("Compute pipeline: {e}")).ok()
+        ComputePipeline::new(
+            device,
+            None,
+            ComputePipelineCreateInfo::stage_layout(stage, layout),
+        )
+        .map_err(|e| warn!("Compute pipeline: {e}"))
+        .ok()
     }
 
     // ── Build GpuGraph from a corridor node list ─────────────────────────────
@@ -436,15 +495,11 @@ impl VulkanAstar {
     // `nodes`: (id64, x, y, z) in f32.  cell_size must match the caller's voxel grid.
     // Builds the voxel hash table with open addressing (load factor ≤ 0.25).
 
-    pub fn build_graph(
-        &self,
-        nodes:     &[(i64, f32, f32, f32)],
-        cell_size: f32,
-    ) -> Option<GpuGraph> {
+    pub fn build_graph(&self, nodes: &[(i64, f32, f32, f32)], cell_size: f32) -> Option<GpuGraph> {
         let n = nodes.len();
-        let mut id_to_idx: HashMap<i64, u32>    = HashMap::with_capacity(n);
-        let mut idx_to_id: Vec<i64>             = Vec::with_capacity(n);
-        let mut node_pos:  Vec<(f32, f32, f32)> = Vec::with_capacity(n);
+        let mut id_to_idx: HashMap<i64, u32> = HashMap::with_capacity(n);
+        let mut idx_to_id: Vec<i64> = Vec::with_capacity(n);
+        let mut node_pos: Vec<(f32, f32, f32)> = Vec::with_capacity(n);
 
         for (i, &(id, x, y, z)) in nodes.iter().enumerate() {
             id_to_idx.insert(id, i as u32);
@@ -455,17 +510,23 @@ impl VulkanAstar {
         // GPU node buffer — host-sequential-write is fine on APU (unified memory)
         let node_buf = Buffer::from_iter(
             self.mem_alloc.clone(),
-            BufferCreateInfo { usage: BufferUsage::STORAGE_BUFFER, ..Default::default() },
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
             AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            node_pos.iter().map(|&(x, y, z)| GpuNode { x, y, z, _pad: 0.0 }),
-        ).ok()?;
+            node_pos
+                .iter()
+                .map(|&(x, y, z)| GpuNode { x, y, z, _pad: 0.0 }),
+        )
+        .ok()?;
 
         // Build CPU voxel grid
-        let mut cpu_grid: HashMap<(i32,i32,i32), Vec<u32>> = HashMap::new();
+        let mut cpu_grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
         for (i, &(x, y, z)) in node_pos.iter().enumerate() {
             let cell = (
                 (x / cell_size).floor() as i32,
@@ -478,26 +539,42 @@ impl VulkanAstar {
         // Flatten to CSR value array + open-addressing hash table
         let table_size = ((cpu_grid.len() * 4).next_power_of_two()).max(16) as u32;
         let table_mask = table_size - 1;
-        let empty_slot = GpuVoxelSlot { cx: 0, cy: 0, cz: 0, offset: 0, count: 0xFFFF_FFFF, _pad: 0 };
+        let empty_slot = GpuVoxelSlot {
+            cx: 0,
+            cy: 0,
+            cz: 0,
+            offset: 0,
+            count: 0xFFFF_FFFF,
+            _pad: 0,
+        };
         let mut table: Vec<GpuVoxelSlot> = vec![empty_slot; table_size as usize];
-        let mut voxel_flat: Vec<u32>     = Vec::new();
+        let mut voxel_flat: Vec<u32> = Vec::new();
 
         for ((cx, cy, cz), indices) in &cpu_grid {
             let offset = voxel_flat.len() as u32;
-            let count  = indices.len() as u32;
+            let count = indices.len() as u32;
             voxel_flat.extend_from_slice(indices);
 
             let mut probe = (hash3_cpu(*cx, *cy, *cz) & table_mask) as usize;
             loop {
                 if table[probe].count == 0xFFFF_FFFF {
-                    table[probe] = GpuVoxelSlot { cx: *cx, cy: *cy, cz: *cz, offset, count, _pad: 0 };
+                    table[probe] = GpuVoxelSlot {
+                        cx: *cx,
+                        cy: *cy,
+                        cz: *cz,
+                        offset,
+                        count,
+                        _pad: 0,
+                    };
                     break;
                 }
                 probe = (probe + 1) & table_mask as usize;
             }
         }
 
-        if voxel_flat.is_empty() { voxel_flat.push(0); } // zero-length SSBO disallowed
+        if voxel_flat.is_empty() {
+            voxel_flat.push(0);
+        } // zero-length SSBO disallowed
 
         fn upload<T: BufferContents>(
             alloc: Arc<StandardMemoryAllocator>,
@@ -505,26 +582,39 @@ impl VulkanAstar {
         ) -> Option<Subbuffer<[T]>> {
             Buffer::from_iter(
                 alloc,
-                BufferCreateInfo { usage: BufferUsage::STORAGE_BUFFER, ..Default::default() },
+                BufferCreateInfo {
+                    usage: BufferUsage::STORAGE_BUFFER,
+                    ..Default::default()
+                },
                 AllocationCreateInfo {
                     memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
                         | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                     ..Default::default()
                 },
                 data,
-            ).ok()
+            )
+            .ok()
         }
 
         let voxel_table = upload(self.mem_alloc.clone(), table)?;
         let voxel_nodes = upload(self.mem_alloc.clone(), voxel_flat)?;
 
-        info!("GpuGraph: {} nodes, {} cells, table_size={}",
-            n, cpu_grid.len(), table_size);
+        info!(
+            "GpuGraph: {} nodes, {} cells, table_size={}",
+            n,
+            cpu_grid.len(),
+            table_size
+        );
 
         Some(GpuGraph {
-            node_buf, voxel_table, voxel_nodes,
-            id_to_idx, idx_to_id, node_pos,
-            cell_size, table_mask,
+            node_buf,
+            voxel_table,
+            voxel_nodes,
+            id_to_idx,
+            idx_to_id,
+            node_pos,
+            cell_size,
+            table_mask,
             node_count: n,
         })
     }
@@ -535,10 +625,7 @@ impl VulkanAstar {
     // within a route, so we build the DS once and reuse it for every dispatch.
     // Eliminates per-dispatch DS allocation + validation overhead.
 
-    fn build_route_ds(
-        &self,
-        graph: &GpuGraph,
-    ) -> Option<Arc<PersistentDescriptorSet>> {
+    fn build_route_ds(&self, graph: &GpuGraph) -> Option<Arc<PersistentDescriptorSet>> {
         PersistentDescriptorSet::new(
             &self.ds_alloc,
             self.pipeline.layout().set_layouts()[0].clone(),
@@ -551,7 +638,9 @@ impl VulkanAstar {
                 WriteDescriptorSet::buffer(5, self.counter_buf.clone()),
             ],
             [],
-        ).map_err(|e| warn!("Route DS create: {e}")).ok()
+        )
+        .map_err(|e| warn!("Route DS create: {e}"))
+        .ok()
     }
 
     // ── GPU dispatch: expand one batch ───────────────────────────────────────
@@ -564,17 +653,19 @@ impl VulkanAstar {
 
     fn dispatch_frontier(
         &self,
-        graph:    &GpuGraph,
+        graph: &GpuGraph,
         frontier: &[(u32, u32)],
-        mu:       u32,
+        mu: u32,
         jump_range: f32,
-        dst_idx:  u32,
-        dst_pos:  (f32, f32, f32),
-        ds:       &Arc<PersistentDescriptorSet>,
+        dst_idx: u32,
+        dst_pos: (f32, f32, f32),
+        ds: &Arc<PersistentDescriptorSet>,
     ) -> Option<Vec<GpuRelaxation>> {
-        if frontier.is_empty() { return Some(vec![]); }
+        if frontier.is_empty() {
+            return Some(vec![]);
+        }
 
-        let fsize     = frontier.len() as u32;
+        let fsize = frontier.len() as u32;
         let max_relax = BATCH_SIZE * MAX_RELAX_PER_NODE;
 
         // ── Write frontier data into pre-allocated buffer ────────────────────
@@ -588,21 +679,24 @@ impl VulkanAstar {
         // ── Zero the counter before each dispatch ────────────────────────────
         {
             let mut guard = self.counter_buf.write().ok()?;
-            *guard = GpuCounter { count: 0, overflow: 0 };
+            *guard = GpuCounter {
+                count: 0,
+                overflow: 0,
+            };
         }
 
         // ── Dispatch ──────────────────────────────────────────────────────────
 
         let pc = PushConstants {
-            frontier_size:        fsize,
+            frontier_size: fsize,
             mu,
-            jump_range_sq:        jump_range * jump_range,
-            cell_size:            graph.cell_size,
-            dst_x:                dst_pos.0,
-            dst_y:                dst_pos.1,
-            dst_z:                dst_pos.2,
-            dst_node_idx:         dst_idx,
-            table_mask:           graph.table_mask,
+            jump_range_sq: jump_range * jump_range,
+            cell_size: graph.cell_size,
+            dst_x: dst_pos.0,
+            dst_y: dst_pos.1,
+            dst_z: dst_pos.2,
+            dst_node_idx: dst_idx,
+            table_mask: graph.table_mask,
             max_total_relaxations: max_relax,
         };
 
@@ -612,39 +706,50 @@ impl VulkanAstar {
             &self.cmd_alloc,
             self.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
-        ).ok()?;
+        )
+        .ok()?;
 
         builder
             .bind_pipeline_compute(self.pipeline.clone())
-            .map_err(|e| warn!("bind pipeline: {e}")).ok()?
+            .map_err(|e| warn!("bind pipeline: {e}"))
+            .ok()?
             .bind_descriptor_sets(
                 PipelineBindPoint::Compute,
                 self.pipeline.layout().clone(),
                 0,
-                ds.clone(),     // Arc clone = refcount bump, not a deep copy
+                ds.clone(), // Arc clone = refcount bump, not a deep copy
             )
-            .map_err(|e| warn!("bind DS: {e}")).ok()?
+            .map_err(|e| warn!("bind DS: {e}"))
+            .ok()?
             .push_constants(self.pipeline.layout().clone(), 0, pc)
-            .map_err(|e| warn!("push constants: {e}")).ok()?
+            .map_err(|e| warn!("push constants: {e}"))
+            .ok()?
             .dispatch([wg, 1, 1])
-            .map_err(|e| warn!("dispatch: {e}")).ok()?;
+            .map_err(|e| warn!("dispatch: {e}"))
+            .ok()?;
 
         let cmd = builder.build().ok()?;
 
         sync::now(self.device.clone())
             .then_execute(self.queue.clone(), cmd)
-            .map_err(|e| warn!("execute: {e}")).ok()?
+            .map_err(|e| warn!("execute: {e}"))
+            .ok()?
             .then_signal_fence_and_flush()
-            .map_err(|e| warn!("flush: {e}")).ok()?
+            .map_err(|e| warn!("flush: {e}"))
+            .ok()?
             .wait(None)
-            .map_err(|e| warn!("wait: {e}")).ok()?;
+            .map_err(|e| warn!("wait: {e}"))
+            .ok()?;
 
         // ── Readback ──────────────────────────────────────────────────────────
 
-        let counter  = self.counter_buf.read().ok()?;
-        let n_relax  = (counter.count as usize).min(max_relax as usize);
+        let counter = self.counter_buf.read().ok()?;
+        let n_relax = (counter.count as usize).min(max_relax as usize);
         if counter.overflow > 0 {
-            warn!("VulkanAstar: {} relaxation overflow — raise MAX_RELAX_PER_NODE", counter.overflow);
+            warn!(
+                "VulkanAstar: {} relaxation overflow — raise MAX_RELAX_PER_NODE",
+                counter.overflow
+            );
         }
 
         let guard = self.relax_buf.read().ok()?;
@@ -667,18 +772,17 @@ impl VulkanAstar {
 
     pub fn run_unidirectional(
         &self,
-        graph:        &GpuGraph,
-        src_id:       i64,
-        dst_id:       i64,
-        jump_range:   f32,
+        graph: &GpuGraph,
+        src_id: i64,
+        dst_id: i64,
+        jump_range: f32,
         greedy_jumps: u32,
-        budget_ms:    u128,
+        deadline: &Deadline,
     ) -> Option<Vec<i64>> {
         let src_idx = *graph.id_to_idx.get(&src_id)?;
         let dst_idx = *graph.id_to_idx.get(&dst_id)?;
         let dst_pos = graph.node_pos[dst_idx as usize];
-        let n       = graph.node_count;
-        let t_start = Instant::now();
+        let n = graph.node_count;
 
         // Build descriptor set once for this entire route.
         let ds = self.build_route_ds(graph)?;
@@ -686,24 +790,38 @@ impl VulkanAstar {
         // ── Flat arrays: O(1) direct-indexed, cache-friendly ─────────────────
         // Replaces HashMap<u32,u32> g_score / came_from and HashSet<u32> closed.
         // Indices are sequential 0..n so we index directly. SENTINEL = "unvisited".
-        let mut g_score:   Vec<u32>  = vec![SENTINEL; n];
-        let mut came_from: Vec<u32>  = vec![SENTINEL; n];
-        let mut closed:    Vec<bool> = vec![false; n];
+        let mut g_score: Vec<u32> = vec![SENTINEL; n];
+        let mut came_from: Vec<u32> = vec![SENTINEL; n];
+        let mut closed: Vec<bool> = vec![false; n];
 
         // min-heap keyed on f = g + h; store f as f64 bits for Ord.
         #[derive(Eq, PartialEq)]
-        struct ONode { f_bits: u64, idx: u32, g: u32 }
-        impl Ord        for ONode { fn cmp(&self, o: &Self) -> std::cmp::Ordering { o.f_bits.cmp(&self.f_bits) } }
-        impl PartialOrd for ONode { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
+        struct ONode {
+            f_bits: u64,
+            idx: u32,
+            g: u32,
+        }
+        impl Ord for ONode {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                o.f_bits.cmp(&self.f_bits)
+            }
+        }
+        impl PartialOrd for ONode {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(o))
+            }
+        }
 
         let jr = jump_range as f64;
         let h = |idx: u32| -> f64 {
             let (x, y, z) = graph.node_pos[idx as usize];
             let (dx, dy, dz) = (x - dst_pos.0, y - dst_pos.1, z - dst_pos.2);
-            ((dx*dx + dy*dy + dz*dz).sqrt() as f64 / jr).ceil()
+            ((dx * dx + dy * dy + dz * dz).sqrt() as f64 / jr).ceil()
         };
         let mk = |idx: u32, g: u32| ONode {
-            f_bits: (g as f64 + h(idx)).to_bits(), idx, g,
+            f_bits: (g as f64 + h(idx)).to_bits(),
+            idx,
+            g,
         };
 
         let mut open = BinaryHeap::with_capacity(BATCH_SIZE as usize * 16);
@@ -717,16 +835,24 @@ impl VulkanAstar {
         let mut batch: Vec<(u32, u32)> = Vec::with_capacity(BATCH_SIZE as usize);
 
         while !open.is_empty() {
-            if t_start.elapsed().as_millis() > budget_ms { break; }
+            if deadline.should_stop() {
+                break;
+            }
 
             // Drain up to BATCH_SIZE nodes with lowest f-score.
             batch.clear();
             while batch.len() < BATCH_SIZE as usize {
                 let Some(node) = open.pop() else { break };
-                if node.g >= best_g_dst                    { continue; }
-                if closed[node.idx as usize]               { continue; }
+                if node.g >= best_g_dst {
+                    continue;
+                }
+                if closed[node.idx as usize] {
+                    continue;
+                }
                 // Stale entry check: heap may hold outdated g-values.
-                if node.g > g_score[node.idx as usize]     { continue; }
+                if node.g > g_score[node.idx as usize] {
+                    continue;
+                }
                 closed[node.idx as usize] = true;
                 if node.idx == dst_idx {
                     best_g_dst = node.g;
@@ -735,11 +861,12 @@ impl VulkanAstar {
                 batch.push((node.idx, node.g));
             }
 
-            if batch.is_empty() { break; }
+            if batch.is_empty() {
+                break;
+            }
 
-            let relaxations = self.dispatch_frontier(
-                graph, &batch, best_g_dst, jump_range, dst_idx, dst_pos, &ds,
-            )?;
+            let relaxations = self
+                .dispatch_frontier(graph, &batch, best_g_dst, jump_range, dst_idx, dst_pos, &ds)?;
 
             for r in &relaxations {
                 let ti = r.to_idx as usize;
@@ -747,12 +874,12 @@ impl VulkanAstar {
                     if r.new_g < best_g_dst {
                         best_g_dst = r.new_g;
                         came_from[ti] = r.from_idx;
-                        g_score[ti]   = r.new_g;
+                        g_score[ti] = r.new_g;
                     }
                     continue;
                 }
                 if r.new_g < g_score[ti] {
-                    g_score[ti]   = r.new_g;
+                    g_score[ti] = r.new_g;
                     came_from[ti] = r.from_idx;
                     if !closed[ti] {
                         open.push(mk(r.to_idx, r.new_g));
@@ -761,8 +888,12 @@ impl VulkanAstar {
             }
         }
 
-        if best_g_dst >= greedy_jumps { return None; } // didn't improve
-        if came_from[dst_idx as usize] == SENTINEL && !closed[dst_idx as usize] { return None; }
+        if best_g_dst >= greedy_jumps {
+            return None;
+        } // didn't improve
+        if came_from[dst_idx as usize] == SENTINEL && !closed[dst_idx as usize] {
+            return None;
+        }
 
         reconstruct_path_flat(&came_from, src_idx, dst_idx, &graph.idx_to_id)
     }
@@ -778,26 +909,25 @@ impl VulkanAstar {
 
     pub fn run_bidirectional(
         &self,
-        graph:        &GpuGraph,
-        src_id:       i64,
-        dst_id:       i64,
-        fwd_seed_id:  i64,   // starting node for forward search (== src_id for carrier)
-        bwd_seed_id:  i64,   // starting node for backward search (== dst_id for carrier)
-        fwd_seed_g:   u32,   // g at fwd_seed (jumps already paid for bridge hops)
-        bwd_seed_g:   u32,
-        jump_range:   f32,
+        graph: &GpuGraph,
+        src_id: i64,
+        dst_id: i64,
+        fwd_seed_id: i64, // starting node for forward search (== src_id for carrier)
+        bwd_seed_id: i64, // starting node for backward search (== dst_id for carrier)
+        fwd_seed_g: u32,  // g at fwd_seed (jumps already paid for bridge hops)
+        bwd_seed_g: u32,
+        jump_range: f32,
         greedy_jumps: u32,
-        budget_ms:    u128,
+        deadline: &Deadline,
     ) -> Option<Vec<i64>> {
-        let src_idx      = *graph.id_to_idx.get(&src_id)?;
-        let dst_idx      = *graph.id_to_idx.get(&dst_id)?;
+        let src_idx = *graph.id_to_idx.get(&src_id)?;
+        let dst_idx = *graph.id_to_idx.get(&dst_id)?;
         let fwd_seed_idx = *graph.id_to_idx.get(&fwd_seed_id)?;
         let bwd_seed_idx = *graph.id_to_idx.get(&bwd_seed_id)?;
-        let src_pos      = graph.node_pos[src_idx as usize];
-        let dst_pos      = graph.node_pos[dst_idx as usize];
-        let n            = graph.node_count;
-        let t_start      = Instant::now();
-        let jr           = jump_range as f64;
+        let src_pos = graph.node_pos[src_idx as usize];
+        let dst_pos = graph.node_pos[dst_idx as usize];
+        let n = graph.node_count;
+        let jr = jump_range as f64;
 
         // Build descriptor set once for this entire route.
         let ds = self.build_route_ds(graph)?;
@@ -805,27 +935,47 @@ impl VulkanAstar {
         let h_fwd = |idx: u32| -> f64 {
             let (x, y, z) = graph.node_pos[idx as usize];
             let (dx, dy, dz) = (x - dst_pos.0, y - dst_pos.1, z - dst_pos.2);
-            ((dx*dx + dy*dy + dz*dz).sqrt() as f64 / jr).ceil()
+            ((dx * dx + dy * dy + dz * dz).sqrt() as f64 / jr).ceil()
         };
         let h_bwd = |idx: u32| -> f64 {
             let (x, y, z) = graph.node_pos[idx as usize];
             let (dx, dy, dz) = (x - src_pos.0, y - src_pos.1, z - src_pos.2);
-            ((dx*dx + dy*dy + dz*dz).sqrt() as f64 / jr).ceil()
+            ((dx * dx + dy * dy + dz * dz).sqrt() as f64 / jr).ceil()
         };
 
         #[derive(Eq, PartialEq)]
-        struct ONode { f_bits: u64, idx: u32, g: u32 }
-        impl Ord        for ONode { fn cmp(&self, o: &Self) -> std::cmp::Ordering { o.f_bits.cmp(&self.f_bits) } }
-        impl PartialOrd for ONode { fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) } }
+        struct ONode {
+            f_bits: u64,
+            idx: u32,
+            g: u32,
+        }
+        impl Ord for ONode {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                o.f_bits.cmp(&self.f_bits)
+            }
+        }
+        impl PartialOrd for ONode {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(o))
+            }
+        }
 
-        let mk_fwd = |idx: u32, g: u32| ONode { f_bits: (g as f64 + h_fwd(idx)).to_bits(), idx, g };
-        let mk_bwd = |idx: u32, g: u32| ONode { f_bits: (g as f64 + h_bwd(idx)).to_bits(), idx, g };
+        let mk_fwd = |idx: u32, g: u32| ONode {
+            f_bits: (g as f64 + h_fwd(idx)).to_bits(),
+            idx,
+            g,
+        };
+        let mk_bwd = |idx: u32, g: u32| ONode {
+            f_bits: (g as f64 + h_bwd(idx)).to_bits(),
+            idx,
+            g,
+        };
 
         // ── Flat arrays for both directions ──────────────────────────────────
-        let mut fwd_g:      Vec<u32>  = vec![SENTINEL; n];
-        let mut bwd_g:      Vec<u32>  = vec![SENTINEL; n];
-        let mut fwd_cf:     Vec<u32>  = vec![SENTINEL; n];
-        let mut bwd_cf:     Vec<u32>  = vec![SENTINEL; n];
+        let mut fwd_g: Vec<u32> = vec![SENTINEL; n];
+        let mut bwd_g: Vec<u32> = vec![SENTINEL; n];
+        let mut fwd_cf: Vec<u32> = vec![SENTINEL; n];
+        let mut bwd_cf: Vec<u32> = vec![SENTINEL; n];
         let mut fwd_closed: Vec<bool> = vec![false; n];
         let mut bwd_closed: Vec<bool> = vec![false; n];
 
@@ -837,19 +987,25 @@ impl VulkanAstar {
         fwd_open.push(mk_fwd(fwd_seed_idx, fwd_seed_g));
         bwd_open.push(mk_bwd(bwd_seed_idx, bwd_seed_g));
 
-        let mut mu:           u32         = greedy_jumps;
+        let mut mu: u32 = greedy_jumps;
         let mut best_meeting: Option<u32> = None;
 
         // Reusable batch buffer.
         let mut batch: Vec<(u32, u32)> = Vec::with_capacity(BATCH_SIZE as usize);
 
         loop {
-            if t_start.elapsed().as_millis() > budget_ms { break; }
-            if fwd_open.is_empty() && bwd_open.is_empty() { break; }
+            if deadline.should_stop() {
+                break;
+            }
+            if fwd_open.is_empty() && bwd_open.is_empty() {
+                break;
+            }
 
             let fwd_min_g = fwd_open.peek().map(|n| n.g).unwrap_or(u32::MAX);
             let bwd_min_g = bwd_open.peek().map(|n| n.g).unwrap_or(u32::MAX);
-            if fwd_min_g.saturating_add(bwd_min_g) >= mu { break; }
+            if fwd_min_g.saturating_add(bwd_min_g) >= mu {
+                break;
+            }
 
             let fwd_min_f = fwd_open.peek().map(|n| n.f_bits).unwrap_or(u64::MAX);
             let bwd_min_f = bwd_open.peek().map(|n| n.f_bits).unwrap_or(u64::MAX);
@@ -860,28 +1016,38 @@ impl VulkanAstar {
                 batch.clear();
                 while batch.len() < BATCH_SIZE as usize {
                     let Some(node) = fwd_open.pop() else { break };
-                    if node.g >= mu                        { continue; }
-                    if fwd_closed[node.idx as usize]       { continue; }
-                    if node.g > fwd_g[node.idx as usize]   { continue; }
+                    if node.g >= mu {
+                        continue;
+                    }
+                    if fwd_closed[node.idx as usize] {
+                        continue;
+                    }
+                    if node.g > fwd_g[node.idx as usize] {
+                        continue;
+                    }
                     fwd_closed[node.idx as usize] = true;
                     // Meeting check
                     let bg = bwd_g[node.idx as usize];
                     if bg != SENTINEL {
                         let total = node.g + bg;
-                        if total < mu { mu = total; best_meeting = Some(node.idx); }
+                        if total < mu {
+                            mu = total;
+                            best_meeting = Some(node.idx);
+                        }
                     }
                     batch.push((node.idx, node.g));
                 }
-                if batch.is_empty() { continue; }
+                if batch.is_empty() {
+                    continue;
+                }
 
-                let relax = self.dispatch_frontier(
-                    graph, &batch, mu, jump_range, dst_idx, dst_pos, &ds,
-                )?;
+                let relax =
+                    self.dispatch_frontier(graph, &batch, mu, jump_range, dst_idx, dst_pos, &ds)?;
 
                 for r in &relax {
                     let ti = r.to_idx as usize;
                     if r.new_g < fwd_g[ti] {
-                        fwd_g[ti]  = r.new_g;
+                        fwd_g[ti] = r.new_g;
                         fwd_cf[ti] = r.from_idx;
                         if !fwd_closed[ti] {
                             fwd_open.push(mk_fwd(r.to_idx, r.new_g));
@@ -889,7 +1055,10 @@ impl VulkanAstar {
                         let bg = bwd_g[ti];
                         if bg != SENTINEL {
                             let total = r.new_g + bg;
-                            if total < mu { mu = total; best_meeting = Some(r.to_idx); }
+                            if total < mu {
+                                mu = total;
+                                best_meeting = Some(r.to_idx);
+                            }
                         }
                     }
                 }
@@ -898,28 +1067,38 @@ impl VulkanAstar {
                 batch.clear();
                 while batch.len() < BATCH_SIZE as usize {
                     let Some(node) = bwd_open.pop() else { break };
-                    if node.g >= mu                        { continue; }
-                    if bwd_closed[node.idx as usize]       { continue; }
-                    if node.g > bwd_g[node.idx as usize]   { continue; }
+                    if node.g >= mu {
+                        continue;
+                    }
+                    if bwd_closed[node.idx as usize] {
+                        continue;
+                    }
+                    if node.g > bwd_g[node.idx as usize] {
+                        continue;
+                    }
                     bwd_closed[node.idx as usize] = true;
                     let fg = fwd_g[node.idx as usize];
                     if fg != SENTINEL {
                         let total = fg + node.g;
-                        if total < mu { mu = total; best_meeting = Some(node.idx); }
+                        if total < mu {
+                            mu = total;
+                            best_meeting = Some(node.idx);
+                        }
                     }
                     batch.push((node.idx, node.g));
                 }
-                if batch.is_empty() { continue; }
+                if batch.is_empty() {
+                    continue;
+                }
 
                 // Backward search treats src as its terminal node for direct-reach.
-                let relax = self.dispatch_frontier(
-                    graph, &batch, mu, jump_range, src_idx, src_pos, &ds,
-                )?;
+                let relax =
+                    self.dispatch_frontier(graph, &batch, mu, jump_range, src_idx, src_pos, &ds)?;
 
                 for r in &relax {
                     let ti = r.to_idx as usize;
                     if r.new_g < bwd_g[ti] {
-                        bwd_g[ti]  = r.new_g;
+                        bwd_g[ti] = r.new_g;
                         bwd_cf[ti] = r.from_idx;
                         if !bwd_closed[ti] {
                             bwd_open.push(mk_bwd(r.to_idx, r.new_g));
@@ -927,14 +1106,19 @@ impl VulkanAstar {
                         let fg = fwd_g[ti];
                         if fg != SENTINEL {
                             let total = fg + r.new_g;
-                            if total < mu { mu = total; best_meeting = Some(r.to_idx); }
+                            if total < mu {
+                                mu = total;
+                                best_meeting = Some(r.to_idx);
+                            }
                         }
                     }
                 }
             }
         }
 
-        if mu >= greedy_jumps { return None; } // didn't beat greedy
+        if mu >= greedy_jumps {
+            return None;
+        } // didn't beat greedy
 
         let m = best_meeting?;
 
@@ -943,7 +1127,9 @@ impl VulkanAstar {
         let mut cur = m;
         while cur != fwd_seed_idx {
             let prev = fwd_cf[cur as usize];
-            if prev == SENTINEL { return None; }
+            if prev == SENTINEL {
+                return None;
+            }
             cur = prev;
             fwd_path.push(cur);
         }
@@ -954,7 +1140,9 @@ impl VulkanAstar {
         let mut cur = m;
         while cur != bwd_seed_idx {
             let prev = bwd_cf[cur as usize];
-            if prev == SENTINEL { break; }
+            if prev == SENTINEL {
+                break;
+            }
             cur = prev;
             bwd_path.push(cur);
         }
@@ -964,7 +1152,8 @@ impl VulkanAstar {
         fwd_path.extend(bwd_path);
 
         // Map back to id64
-        let mid_ids: Vec<i64> = fwd_path.iter()
+        let mid_ids: Vec<i64> = fwd_path
+            .iter()
             .map(|&i| graph.idx_to_id[i as usize])
             .collect();
 
@@ -978,22 +1167,24 @@ impl VulkanAstar {
 #[inline(always)]
 pub fn hash3_cpu(cx: i32, cy: i32, cz: i32) -> u32 {
     (cx as u32).wrapping_mul(2654435761)
-    ^ (cy as u32).wrapping_mul(805459861)
-    ^ (cz as u32).wrapping_mul(3266489917)
+        ^ (cy as u32).wrapping_mul(805459861)
+        ^ (cz as u32).wrapping_mul(3266489917)
 }
 
 /// Path reconstruction using flat came_from array.
 fn reconstruct_path_flat(
     came_from: &[u32],
-    src_idx:   u32,
-    dst_idx:   u32,
+    src_idx: u32,
+    dst_idx: u32,
     idx_to_id: &[i64],
 ) -> Option<Vec<i64>> {
     let mut path_idx = vec![dst_idx];
     let mut cur = dst_idx;
     while cur != src_idx {
         let prev = came_from[cur as usize];
-        if prev == SENTINEL { return None; }
+        if prev == SENTINEL {
+            return None;
+        }
         cur = prev;
         path_idx.push(cur);
     }

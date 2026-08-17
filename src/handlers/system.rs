@@ -1,15 +1,23 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Json,
+};
 use rusqlite::params;
 use std::sync::Arc;
 
-use crate::models::{SystemQuery, DistanceQuery};
+use crate::models::{DistanceQuery, SystemQuery};
 use crate::state::AppState;
 
 pub async fn get_system(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SystemQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.query_semaphore.acquire().await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
+    let _permit = state
+        .query_semaphore
+        .acquire()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
 
     let by_id64 = params.id64;
     let by_name = params.system_name;
@@ -84,7 +92,11 @@ pub async fn get_system_bodies(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SystemQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.query_semaphore.acquire().await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
+    let _permit = state
+        .query_semaphore
+        .acquire()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
 
     let by_id64 = params.id64;
     let by_name = params.system_name;
@@ -182,8 +194,14 @@ pub async fn get_system_stations(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SystemQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.query_semaphore.acquire().await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
-    let name = params.system_name.ok_or((StatusCode::BAD_REQUEST, "Missing systemName".into()))?;
+    let _permit = state
+        .query_semaphore
+        .acquire()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
+    let name = params
+        .system_name
+        .ok_or((StatusCode::BAD_REQUEST, "Missing systemName".into()))?;
 
     let pool = state.db_pool.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
@@ -254,7 +272,10 @@ pub async fn get_distance(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DistanceQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.query_semaphore.acquire().await
+    let _permit = state
+        .query_semaphore
+        .acquire()
+        .await
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
 
     let name_a = params.system_a;

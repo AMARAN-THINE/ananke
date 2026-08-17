@@ -2,7 +2,6 @@
 /// Ported from Esvandiary's EDTS (pgnames.py, pgdata.py, sector.py, util.py).
 /// Derives approximate galactic coordinates from any procedurally generated
 /// Elite Dangerous system name. Zero database dependency for sector lookup.
-
 use std::sync::OnceLock;
 
 const SECTOR_SIZE: f64 = 1280.0;
@@ -14,68 +13,69 @@ const BASE_COORDS: [f64; 3] = [-65.0, -25.0, -1065.0];
 // Fragment tables (from pgdata.py)
 // ============================================================
 const CX_PREFIXES: &[&str] = &[
-  "Th","Eo","Oo","Eu","Tr","Sly","Dry","Ou","Tz","Phl","Ae","Sch","Hyp","Syst","Ai","Kyl",
-  "Phr","Eae","Ph","Fl","Ao","Scr","Shr","Fly","Pl","Fr","Au","Pry","Pr","Hyph","Py","Chr",
-  "Phyl","Tyr","Bl","Cry","Gl","Br","Gr","By","Aae","Myc","Gyr","Ly","Myl","Lych","Myn","Ch",
-  "Myr","Cl","Rh","Wh","Pyr","Cr","Syn","Str","Syr","Cy","Wr","Hy","My","Sty","Sc","Sph",
-  "Spl","A","Sh","B","C","D","Sk","Io","Dr","E","Sl","F","Sm","G","H","I",
-  "Sp","J","Sq","K","L","Pyth","M","St","N","O","Ny","Lyr","P","Sw","Thr","Lys",
-  "Q","R","S","T","Ea","U","V","W","Schr","X","Ee","Y","Z","Ei","Oe",
+    "Th", "Eo", "Oo", "Eu", "Tr", "Sly", "Dry", "Ou", "Tz", "Phl", "Ae", "Sch", "Hyp", "Syst",
+    "Ai", "Kyl", "Phr", "Eae", "Ph", "Fl", "Ao", "Scr", "Shr", "Fly", "Pl", "Fr", "Au", "Pry",
+    "Pr", "Hyph", "Py", "Chr", "Phyl", "Tyr", "Bl", "Cry", "Gl", "Br", "Gr", "By", "Aae", "Myc",
+    "Gyr", "Ly", "Myl", "Lych", "Myn", "Ch", "Myr", "Cl", "Rh", "Wh", "Pyr", "Cr", "Syn", "Str",
+    "Syr", "Cy", "Wr", "Hy", "My", "Sty", "Sc", "Sph", "Spl", "A", "Sh", "B", "C", "D", "Sk", "Io",
+    "Dr", "E", "Sl", "F", "Sm", "G", "H", "I", "Sp", "J", "Sq", "K", "L", "Pyth", "M", "St", "N",
+    "O", "Ny", "Lyr", "P", "Sw", "Thr", "Lys", "Q", "R", "S", "T", "Ea", "U", "V", "W", "Schr",
+    "X", "Ee", "Y", "Z", "Ei", "Oe",
 ];
 
 const C1_INFIXES_S1: &[&str] = &[
-  "o","ai","a","oi","ea","ie","u","e","ee","oo","ue","i","oa","au","ae","oe",
+    "o", "ai", "a", "oi", "ea", "ie", "u", "e", "ee", "oo", "ue", "i", "oa", "au", "ae", "oe",
 ];
 
 const C1_INFIXES_S2: &[&str] = &[
-  "ll","ss","b","c","d","f","dg","g","ng","h","j","k","l","m","n","mb",
-  "p","q","gn","th","r","s","t","ch","tch","v","w","wh","ck","x","y","z","ph","sh","ct","wr",
+    "ll", "ss", "b", "c", "d", "f", "dg", "g", "ng", "h", "j", "k", "l", "m", "n", "mb", "p", "q",
+    "gn", "th", "r", "s", "t", "ch", "tch", "v", "w", "wh", "ck", "x", "y", "z", "ph", "sh", "ct",
+    "wr",
 ];
 
 const CX_SUFFIXES_S1: &[&str] = &[
-  "oe","io","oea","oi","aa","ua","eia","ae","ooe","oo","a","ue","ai","e","iae","oae",
-  "ou","uae","i","ao","au","o","eae","u","aea","ia","ie","eou","aei","ea","uia","oa","aae","eau","ee",
+    "oe", "io", "oea", "oi", "aa", "ua", "eia", "ae", "ooe", "oo", "a", "ue", "ai", "e", "iae",
+    "oae", "ou", "uae", "i", "ao", "au", "o", "eae", "u", "aea", "ia", "ie", "eou", "aei", "ea",
+    "uia", "oa", "aae", "eau", "ee",
 ];
 
 const C1_SUFFIXES_S2: &[&str] = &[
-  "b","scs","wsy","c","d","vsky","f","sms","dst","g","rb","h","nts","ch","rd","rld",
-  "k","lls","ck","rgh","l","rg","m","n","hm","p","hn","rk","q","rl","r","rm",
-  "s","cs","wyg","rn","ct","t","hs","rbs","rp","tts","v","wn","ms","w","rr","mt",
-  "x","rs","cy","y","rt","z","ws","lch","my","ry","nks","nd","sc","ng","sh","nk",
-  "sk","nn","ds","sm","sp","ns","nt","dy","ss","st","rrs","xt","nz","sy","xy","rsch",
-  "rphs","sts","sys","sty","th","tl","tls","rds","nch","rns","ts","wls","rnt","tt","rdy","rst",
-  "pps","tz","tch","sks","ppy","ff","sps","kh","sky","ph","lts","wnst","rth","ths","fs","pp",
-  "ft","ks","pr","ps","pt","fy","rts","ky","rshch","mly","py","bb","nds","wry","zz","nns",
-  "ld","lf","gh","lks","sly","lk","ll","rph","ln","bs","rsts","gs","ls","vvy","lt","rks",
-  "qs","rps","gy","wns","lz","nth","phs",
+    "b", "scs", "wsy", "c", "d", "vsky", "f", "sms", "dst", "g", "rb", "h", "nts", "ch", "rd",
+    "rld", "k", "lls", "ck", "rgh", "l", "rg", "m", "n", "hm", "p", "hn", "rk", "q", "rl", "r",
+    "rm", "s", "cs", "wyg", "rn", "ct", "t", "hs", "rbs", "rp", "tts", "v", "wn", "ms", "w", "rr",
+    "mt", "x", "rs", "cy", "y", "rt", "z", "ws", "lch", "my", "ry", "nks", "nd", "sc", "ng", "sh",
+    "nk", "sk", "nn", "ds", "sm", "sp", "ns", "nt", "dy", "ss", "st", "rrs", "xt", "nz", "sy",
+    "xy", "rsch", "rphs", "sts", "sys", "sty", "th", "tl", "tls", "rds", "nch", "rns", "ts", "wls",
+    "rnt", "tt", "rdy", "rst", "pps", "tz", "tch", "sks", "ppy", "ff", "sps", "kh", "sky", "ph",
+    "lts", "wnst", "rth", "ths", "fs", "pp", "ft", "ks", "pr", "ps", "pt", "fy", "rts", "ky",
+    "rshch", "mly", "py", "bb", "nds", "wry", "zz", "nns", "ld", "lf", "gh", "lks", "sly", "lk",
+    "ll", "rph", "ln", "bs", "rsts", "gs", "ls", "vvy", "lt", "rks", "qs", "rps", "gy", "wns",
+    "lz", "nth", "phs",
 ];
 
 // All raw fragments in original order for greedy parsing
 const CX_RAW_FRAGMENTS: &[&str] = &[
-  "Th","Eo","Oo","Eu","Tr","Sly","Dry","Ou","Tz","Phl","Ae","Sch","Hyp","Syst","Ai","Kyl",
-  "Phr","Eae","Ph","Fl","Ao","Scr","Shr","Fly","Pl","Fr","Au","Pry","Pr","Hyph","Py","Chr",
-  "Phyl","Tyr","Bl","Cry","Gl","Br","Gr","By","Aae","Myc","Gyr","Ly","Myl","Lych","Myn","Ch",
-  "Myr","Cl","Rh","Wh","Pyr","Cr","Syn","Str","Syr","Cy","Wr","Hy","My","Sty","Sc","Sph",
-  "Spl","A","Sh","B","C","D","Sk","Io","Dr","E","Sl","F","Sm","G","H","I",
-  "Sp","J","Sq","K","L","Pyth","M","St","N","O","Ny","Lyr","P","Sw","Thr","Lys",
-  "Q","R","S","T","Ea","U","V","W","Schr","X","Ee","Y","Z","Ei","Oe",
-  "ll","ss","b","c","d","f","dg","g","ng","h","j","k","l","m","n",
-  "mb","p","q","gn","th","r","s","t","ch","tch","v","w","wh",
-  "ck","x","y","z","ph","sh","ct","wr","o","ai","a","oi","ea",
-  "ie","u","e","ee","oo","ue","i","oa","au","ae","oe","scs",
-  "wsy","vsky","sms","dst","rb","nts","rd","rld","lls","rgh",
-  "rg","hm","hn","rk","rl","rm","cs","wyg","rn","hs","rbs","rp",
-  "tts","wn","ms","rr","mt","rs","cy","rt","ws","lch","my","ry",
-  "nks","nd","sc","nk","sk","nn","ds","sm","sp","ns","nt","dy",
-  "st","rrs","xt","nz","sy","xy","rsch","rphs","sts","sys","sty",
-  "tl","tls","rds","nch","rns","ts","wls","rnt","tt","rdy","rst",
-  "pps","tz","sks","ppy","ff","sps","kh","sky","lts","wnst","rth",
-  "ths","fs","pp","ft","ks","pr","ps","pt","fy","rts","ky",
-  "rshch","mly","py","bb","nds","wry","zz","nns","ld","lf",
-  "gh","lks","sly","lk","rph","ln","bs","rsts","gs","ls","vvy",
-  "lt","rks","qs","rps","gy","wns","lz","nth","phs","io","oea",
-  "aa","ua","eia","ooe","iae","oae","ou","uae","ao","eae",
-  "aea","ia","eou","aei","uia","aae","eau",
+    "Th", "Eo", "Oo", "Eu", "Tr", "Sly", "Dry", "Ou", "Tz", "Phl", "Ae", "Sch", "Hyp", "Syst",
+    "Ai", "Kyl", "Phr", "Eae", "Ph", "Fl", "Ao", "Scr", "Shr", "Fly", "Pl", "Fr", "Au", "Pry",
+    "Pr", "Hyph", "Py", "Chr", "Phyl", "Tyr", "Bl", "Cry", "Gl", "Br", "Gr", "By", "Aae", "Myc",
+    "Gyr", "Ly", "Myl", "Lych", "Myn", "Ch", "Myr", "Cl", "Rh", "Wh", "Pyr", "Cr", "Syn", "Str",
+    "Syr", "Cy", "Wr", "Hy", "My", "Sty", "Sc", "Sph", "Spl", "A", "Sh", "B", "C", "D", "Sk", "Io",
+    "Dr", "E", "Sl", "F", "Sm", "G", "H", "I", "Sp", "J", "Sq", "K", "L", "Pyth", "M", "St", "N",
+    "O", "Ny", "Lyr", "P", "Sw", "Thr", "Lys", "Q", "R", "S", "T", "Ea", "U", "V", "W", "Schr",
+    "X", "Ee", "Y", "Z", "Ei", "Oe", "ll", "ss", "b", "c", "d", "f", "dg", "g", "ng", "h", "j",
+    "k", "l", "m", "n", "mb", "p", "q", "gn", "th", "r", "s", "t", "ch", "tch", "v", "w", "wh",
+    "ck", "x", "y", "z", "ph", "sh", "ct", "wr", "o", "ai", "a", "oi", "ea", "ie", "u", "e", "ee",
+    "oo", "ue", "i", "oa", "au", "ae", "oe", "scs", "wsy", "vsky", "sms", "dst", "rb", "nts", "rd",
+    "rld", "lls", "rgh", "rg", "hm", "hn", "rk", "rl", "rm", "cs", "wyg", "rn", "hs", "rbs", "rp",
+    "tts", "wn", "ms", "rr", "mt", "rs", "cy", "rt", "ws", "lch", "my", "ry", "nks", "nd", "sc",
+    "nk", "sk", "nn", "ds", "sm", "sp", "ns", "nt", "dy", "st", "rrs", "xt", "nz", "sy", "xy",
+    "rsch", "rphs", "sts", "sys", "sty", "tl", "tls", "rds", "nch", "rns", "ts", "wls", "rnt",
+    "tt", "rdy", "rst", "pps", "tz", "sks", "ppy", "ff", "sps", "kh", "sky", "lts", "wnst", "rth",
+    "ths", "fs", "pp", "ft", "ks", "pr", "ps", "pt", "fy", "rts", "ky", "rshch", "mly", "py", "bb",
+    "nds", "wry", "zz", "nns", "ld", "lf", "gh", "lks", "sly", "lk", "rph", "ln", "bs", "rsts",
+    "gs", "ls", "vvy", "lt", "rks", "qs", "rps", "gy", "wns", "lz", "nth", "phs", "io", "oea",
+    "aa", "ua", "eia", "ooe", "iae", "oae", "ou", "uae", "ao", "eae", "aea", "ia", "eou", "aei",
+    "uia", "aae", "eau",
 ];
 
 // ============================================================
@@ -83,33 +83,74 @@ const CX_RAW_FRAGMENTS: &[&str] = &[
 // ============================================================
 fn prefix_run_length(p: &str) -> usize {
     match p {
-        "Eu"=>31,"Sly"=>4,"Tz"=>1,"Phl"=>13,"Ae"=>12,"Hyp"=>25,"Kyl"=>30,"Phr"=>10,
-        "Eae"=>4,"Ao"=>5,"Scr"=>24,"Shr"=>11,"Fly"=>20,"Pry"=>3,"Hyph"=>14,"Py"=>12,
-        "Phyl"=>8,"Tyr"=>25,"Cry"=>5,"Aae"=>5,"Myc"=>2,"Gyr"=>10,"Myl"=>12,"Lych"=>3,
-        "Myn"=>10,"Myr"=>4,"Rh"=>15,"Wr"=>31,"Sty"=>4,"Spl"=>16,"Sk"=>27,"Sq"=>7,
-        "Pyth"=>1,"Lyr"=>10,"Sw"=>24,"Thr"=>32,"Lys"=>10,"Schr"=>3,"Z"=>34,
+        "Eu" => 31,
+        "Sly" => 4,
+        "Tz" => 1,
+        "Phl" => 13,
+        "Ae" => 12,
+        "Hyp" => 25,
+        "Kyl" => 30,
+        "Phr" => 10,
+        "Eae" => 4,
+        "Ao" => 5,
+        "Scr" => 24,
+        "Shr" => 11,
+        "Fly" => 20,
+        "Pry" => 3,
+        "Hyph" => 14,
+        "Py" => 12,
+        "Phyl" => 8,
+        "Tyr" => 25,
+        "Cry" => 5,
+        "Aae" => 5,
+        "Myc" => 2,
+        "Gyr" => 10,
+        "Myl" => 12,
+        "Lych" => 3,
+        "Myn" => 10,
+        "Myr" => 4,
+        "Rh" => 15,
+        "Wr" => 31,
+        "Sty" => 4,
+        "Spl" => 16,
+        "Sk" => 27,
+        "Sq" => 7,
+        "Pyth" => 1,
+        "Lyr" => 10,
+        "Sw" => 24,
+        "Thr" => 32,
+        "Lys" => 10,
+        "Schr" => 3,
+        "Z" => 34,
         _ => 35,
     }
 }
 
 fn c2_suffix_idx(prefix: &str) -> usize {
     match prefix {
-        "Eo"|"Oo"|"Eu"|"Ou"|"Ae"|"Ai"|"Eae"|"Ao"|"Au"|"Aae" => 2, _ => 1,
-    }
-}
-
-fn c1_infix_idx(prefix: &str) -> usize {
-    match prefix {
-        "Eo"|"Oo"|"Eu"|"Ou"|"Ae"|"Ai"|"Eae"|"Ao"|"Au"|"Aae"
-        |"A"|"Io"|"E"|"I"|"O"|"Ea"|"U"|"Ee"|"Ei"|"Oe" => 2, _ => 1,
+        "Eo" | "Oo" | "Eu" | "Ou" | "Ae" | "Ai" | "Eae" | "Ao" | "Au" | "Aae" => 2,
+        _ => 1,
     }
 }
 
 fn c1_infix_run_length(frag: &str) -> usize {
     match frag {
-        "oi"=>88,"ue"=>147,"oa"=>57,"au"=>119,"ae"=>12,"oe"=>39,
-        "dg"=>31,"tch"=>20,"wr"=>31,
-        _ => if C1_INFIXES_S1.contains(&frag) { C1_SUFFIXES_S2.len() } else { CX_SUFFIXES_S1.len() }
+        "oi" => 88,
+        "ue" => 147,
+        "oa" => 57,
+        "au" => 119,
+        "ae" => 12,
+        "oe" => 39,
+        "dg" => 31,
+        "tch" => 20,
+        "wr" => 31,
+        _ => {
+            if C1_INFIXES_S1.contains(&frag) {
+                C1_SUFFIXES_S2.len()
+            } else {
+                CX_SUFFIXES_S1.len()
+            }
+        }
     }
 }
 
@@ -133,21 +174,40 @@ fn build_lookup() -> PgLookup {
 
     let mut prefix_offsets = Vec::with_capacity(CX_PREFIXES.len());
     let mut cnt = 0usize;
-    for &p in CX_PREFIXES { let plen = prefix_run_length(p); prefix_offsets.push((cnt, plen)); cnt += plen; }
+    for &p in CX_PREFIXES {
+        let plen = prefix_run_length(p);
+        prefix_offsets.push((cnt, plen));
+        cnt += plen;
+    }
     let prefix_total_run = cnt;
 
     let mut c1_infix_offsets_s1 = Vec::with_capacity(C1_INFIXES_S1.len());
     cnt = 0;
-    for &i in C1_INFIXES_S1 { let ilen = c1_infix_run_length(i); c1_infix_offsets_s1.push((cnt, ilen)); cnt += ilen; }
+    for &i in C1_INFIXES_S1 {
+        let ilen = c1_infix_run_length(i);
+        c1_infix_offsets_s1.push((cnt, ilen));
+        cnt += ilen;
+    }
     let c1_infix_s1_total = cnt;
 
     let mut c1_infix_offsets_s2 = Vec::with_capacity(C1_INFIXES_S2.len());
     cnt = 0;
-    for &i in C1_INFIXES_S2 { let ilen = c1_infix_run_length(i); c1_infix_offsets_s2.push((cnt, ilen)); cnt += ilen; }
+    for &i in C1_INFIXES_S2 {
+        let ilen = c1_infix_run_length(i);
+        c1_infix_offsets_s2.push((cnt, ilen));
+        cnt += ilen;
+    }
     let c1_infix_s2_total = cnt;
 
-    PgLookup { fragments_sorted: frags, prefix_offsets, prefix_total_run,
-               c1_infix_offsets_s1, c1_infix_offsets_s2, c1_infix_s1_total, c1_infix_s2_total }
+    PgLookup {
+        fragments_sorted: frags,
+        prefix_offsets,
+        prefix_total_run,
+        c1_infix_offsets_s1,
+        c1_infix_offsets_s2,
+        c1_infix_s1_total,
+        c1_infix_s2_total,
+    }
 }
 
 fn lookup() -> &'static PgLookup {
@@ -159,17 +219,25 @@ fn lookup() -> &'static PgLookup {
 // Utility (from util.py)
 // ============================================================
 fn jenkins32(mut key: u32) -> u32 {
-    key = key.wrapping_add(key << 12); key ^= key >> 22;
-    key = key.wrapping_add(key << 4);  key ^= key >> 9;
-    key = key.wrapping_add(key << 10); key ^= key >> 2;
-    key = key.wrapping_add(key << 7);  key ^= key >> 12;
+    key = key.wrapping_add(key << 12);
+    key ^= key >> 22;
+    key = key.wrapping_add(key << 4);
+    key ^= key >> 9;
+    key = key.wrapping_add(key << 10);
+    key ^= key >> 2;
+    key = key.wrapping_add(key << 7);
+    key ^= key >> 12;
     key
 }
 
 fn interleave(val1: u64, val2: u64, maxbits: u32) -> u64 {
     let mut output: u64 = 0;
-    for i in 0..=(maxbits / 2) { output |= ((val1 >> i) & 1) << (i * 2); }
-    for i in 0..=(maxbits / 2) { output |= ((val2 >> i) & 1) << (i * 2 + 1); }
+    for i in 0..=(maxbits / 2) {
+        output |= ((val1 >> i) & 1) << (i * 2);
+    }
+    for i in 0..=(maxbits / 2) {
+        output |= ((val2 >> i) & 1) << (i * 2 + 1);
+    }
     output & ((1u64 << maxbits) - 1)
 }
 
@@ -180,9 +248,19 @@ fn to_title_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut cap = true;
     for ch in s.chars() {
-        if ch == ' ' || ch == '-' { cap = true; result.push(ch); }
-        else if cap { for c in ch.to_uppercase() { result.push(c); } cap = false; }
-        else { for c in ch.to_lowercase() { result.push(c); } }
+        if ch == ' ' || ch == '-' {
+            cap = true;
+            result.push(ch);
+        } else if cap {
+            for c in ch.to_uppercase() {
+                result.push(c);
+            }
+            cap = false;
+        } else {
+            for c in ch.to_lowercase() {
+                result.push(c);
+            }
+        }
     }
     result
 }
@@ -202,17 +280,29 @@ fn get_sector_fragments(sector_name: &str) -> Option<Vec<String>> {
                 break;
             }
         }
-        if !found { return None; }
+        if !found {
+            return None;
+        }
     }
-    if segments.len() <= 4 { Some(segments) } else { None }
+    if segments.len() <= 4 {
+        Some(segments)
+    } else {
+        None
+    }
 }
 
-fn is_prefix(s: &str) -> bool { CX_PREFIXES.contains(&s) }
+fn is_prefix(s: &str) -> bool {
+    CX_PREFIXES.contains(&s)
+}
 
 fn get_sector_class(frags: &[String]) -> Option<u8> {
-    if frags.len() == 4 && is_prefix(&frags[0]) && is_prefix(&frags[2]) { Some(2) }
-    else if (frags.len() == 3 || frags.len() == 4) && is_prefix(&frags[0]) { Some(1) }
-    else { None }
+    if frags.len() == 4 && is_prefix(&frags[0]) && is_prefix(&frags[2]) {
+        Some(2)
+    } else if (frags.len() == 3 || frags.len() == 4) && is_prefix(&frags[0]) {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 // ============================================================
@@ -220,36 +310,70 @@ fn get_sector_class(frags: &[String]) -> Option<u8> {
 // ============================================================
 fn get_suffixes_for_prefix(word_start: &str, get_all: bool) -> &'static [&'static str] {
     let idx = c2_suffix_idx(word_start);
-    let full: &[&str] = if idx == 2 { &C1_SUFFIXES_S2[..CX_SUFFIXES_S1.len()] } else { CX_SUFFIXES_S1 };
-    if get_all { full } else { &full[..prefix_run_length(word_start).min(full.len())] }
+    let full: &[&str] = if idx == 2 {
+        &C1_SUFFIXES_S2[..CX_SUFFIXES_S1.len()]
+    } else {
+        CX_SUFFIXES_S1
+    };
+    if get_all {
+        full
+    } else {
+        &full[..prefix_run_length(word_start).min(full.len())]
+    }
 }
 
 fn get_c1_suffixes(frags: &[String], get_all: bool) -> &'static [&'static str] {
     let last = frags.last().unwrap();
-    if is_prefix(last) { return get_suffixes_for_prefix(last, get_all); }
+    if is_prefix(last) {
+        return get_suffixes_for_prefix(last, get_all);
+    }
     if C1_INFIXES_S2.contains(&last.as_str()) {
-        if get_all { CX_SUFFIXES_S1 } else { &CX_SUFFIXES_S1[..prefix_run_length(&frags[0]).min(CX_SUFFIXES_S1.len())] }
+        if get_all {
+            CX_SUFFIXES_S1
+        } else {
+            &CX_SUFFIXES_S1[..prefix_run_length(&frags[0]).min(CX_SUFFIXES_S1.len())]
+        }
     } else {
-        let len = if get_all { C1_SUFFIXES_S2.len() } else { prefix_run_length(&frags[0]).min(C1_SUFFIXES_S2.len()) };
+        let len = if get_all {
+            C1_SUFFIXES_S2.len()
+        } else {
+            prefix_run_length(&frags[0]).min(C1_SUFFIXES_S2.len())
+        };
         &C1_SUFFIXES_S2[..len]
     }
 }
 
 fn c1_infix_offset(frag: &str) -> (usize, usize) {
     let lu = lookup();
-    for (i, &inf) in C1_INFIXES_S1.iter().enumerate() { if inf == frag { return lu.c1_infix_offsets_s1[i]; } }
-    for (i, &inf) in C1_INFIXES_S2.iter().enumerate() { if inf == frag { return lu.c1_infix_offsets_s2[i]; } }
+    for (i, &inf) in C1_INFIXES_S1.iter().enumerate() {
+        if inf == frag {
+            return lu.c1_infix_offsets_s1[i];
+        }
+    }
+    for (i, &inf) in C1_INFIXES_S2.iter().enumerate() {
+        if inf == frag {
+            return lu.c1_infix_offsets_s2[i];
+        }
+    }
     (0, 0)
 }
 
 fn c1_infix_total_run(frag: &str) -> usize {
     let lu = lookup();
-    if C1_INFIXES_S1.contains(&frag) { lu.c1_infix_s1_total } else { lu.c1_infix_s2_total }
+    if C1_INFIXES_S1.contains(&frag) {
+        lu.c1_infix_s1_total
+    } else {
+        lu.c1_infix_s2_total
+    }
 }
 
 fn prefix_offset(p: &str) -> (usize, usize) {
     let lu = lookup();
-    for (i, &px) in CX_PREFIXES.iter().enumerate() { if px == p { return lu.prefix_offsets[i]; } }
+    for (i, &px) in CX_PREFIXES.iter().enumerate() {
+        if px == p {
+            return lu.prefix_offsets[i];
+        }
+    }
     (0, 0)
 }
 
@@ -257,7 +381,9 @@ fn prefix_offset(p: &str) -> (usize, usize) {
 // Class 2 offset (two-word names like "Flyua Phio")
 // ============================================================
 fn c2_get_offset_from_name(frags: &[String]) -> Option<u64> {
-    if frags.len() != 4 { return None; }
+    if frags.len() != 4 {
+        return None;
+    }
     let sufs0 = get_suffixes_for_prefix(&frags[0], false);
     let sufs1 = get_suffixes_for_prefix(&frags[2], false);
     let idx0 = sufs0.iter().position(|&s| s == frags[1])? + prefix_offset(&frags[0]).0;
@@ -269,8 +395,8 @@ fn c2_get_offset_from_name(frags: &[String]) -> Option<u64> {
 // Class 1 offset (one-word names like "Wregoe")
 // ============================================================
 fn c1_get_offset_from_name(frags: &[String]) -> Option<u64> {
-    let sufs = get_c1_suffixes(&frags[..frags.len()-1], true);
-    let suf_offset_raw = sufs.iter().position(|&s| s == frags[frags.len()-1])?;
+    let sufs = get_c1_suffixes(&frags[..frags.len() - 1], true);
+    let suf_offset_raw = sufs.iter().position(|&s| s == frags[frags.len() - 1])?;
     let mut f3_offset = suf_offset_raw;
 
     if frags.len() > 3 {
@@ -301,7 +427,11 @@ fn sector_pos_from_offset(offset: u64) -> (i64, i64, i64) {
     let o = offset as i64;
     let gx = GALAXY_SIZE[0] as i64;
     let gy = GALAXY_SIZE[1] as i64;
-    (o % gx - BASE_SECTOR_INDEX[0], (o / gx) % gy - BASE_SECTOR_INDEX[1], o / (gx * gy) - BASE_SECTOR_INDEX[2])
+    (
+        o % gx - BASE_SECTOR_INDEX[0],
+        (o / gx) % gy - BASE_SECTOR_INDEX[1],
+        o / (gx * gy) - BASE_SECTOR_INDEX[2],
+    )
 }
 
 /// Sector lookup: name -> relative sector coordinates. Pure math, no DB.
@@ -312,7 +442,9 @@ pub fn sector_from_name(sector_name: &str) -> Option<(i64, i64, i64)> {
         2 => c2_get_offset_from_name(&frags)?,
         1 => {
             let raw = c1_get_offset_from_name(&frags)?;
-            if (jenkins32(raw as u32) % 2) + 1 != 1 { return None; }
+            if (jenkins32(raw as u32) % 2) + 1 != 1 {
+                return None;
+            }
             raw
         }
         _ => return None,
@@ -327,43 +459,88 @@ pub fn sector_from_name(sector_name: &str) -> Option<(i64, i64, i64)> {
 #[allow(dead_code)]
 pub struct ProcGenName {
     pub sector_name: String,
-    pub l1: u32, pub l2: u32, pub l3: u32,
-    pub mass_code: u32, pub mass_char: char,
-    pub n1: u32, pub n2: u32,
+    pub l1: u32,
+    pub l2: u32,
+    pub l3: u32,
+    pub mass_code: u32,
+    pub mass_char: char,
+    pub n1: u32,
+    pub n2: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct EstimatedCoords {
-    pub x: f64, pub y: f64, pub z: f64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
     pub uncertainty_ly: f64,
 }
 
 pub fn parse_procgen_name(name: &str) -> Option<ProcGenName> {
     let name = name.trim();
-    if name.len() < 10 { return None; }
+    // Cheap prefilter only. The shortest structurally valid name is of the
+    // form "Xyz AA-A a0" once n1 is omitted, so the old cutoff of 10 was
+    // close enough to the real minimum to be a hazard. The structural checks
+    // below are what actually reject non-procgen names.
+    if name.len() < 8 {
+        return None;
+    }
     let last_space = name.rfind(' ')?;
     let tail = &name[last_space + 1..];
     let prefix = &name[..last_space];
     let mass_char = tail.chars().next()?;
-    if !mass_char.is_ascii_lowercase() || mass_char < 'a' || mass_char > 'h' { return None; }
+    if !mass_char.is_ascii_lowercase() || mass_char < 'a' || mass_char > 'h' {
+        return None;
+    }
     let mass_code = (mass_char as u32) - ('a' as u32);
+    // Number segment. The canonical form is "<n1>-<n2>", but n1 is OMITTED
+    // ALONG WITH ITS HYPHEN whenever it is zero:
+    //   "Eotchorts EG-X d1-265"  -> n1 = 1, n2 = 265
+    //   "Eotchorts YE-Z d237"    -> n1 = 0, n2 = 237
+    //   "Eotchorts AA-Z d419"    -> n1 = 0, n2 = 419
+    // Requiring the hyphen therefore rejected every n1=0 system in the galaxy,
+    // which is the majority of them at low mass codes.
     let numbers = &tail[1..];
-    let dash_pos = numbers.find('-')?;
-    let n1: u32 = numbers[..dash_pos].parse().ok()?;
-    let n2: u32 = numbers[dash_pos + 1..].parse().ok()?;
+    if numbers.is_empty() {
+        return None;
+    }
+    let (n1, n2): (u32, u32) = match numbers.find('-') {
+        Some(dash_pos) => (
+            numbers[..dash_pos].parse().ok()?,
+            numbers[dash_pos + 1..].parse().ok()?,
+        ),
+        None => (0, numbers.parse().ok()?),
+    };
     let prefix = prefix.trim();
-    if prefix.len() < 4 { return None; }
+    if prefix.len() < 4 {
+        return None;
+    }
     let last_space2 = prefix.rfind(' ')?;
     let subsector = &prefix[last_space2 + 1..];
     let sector_name = prefix[..last_space2].trim();
-    if subsector.len() != 4 { return None; }
+    if subsector.len() != 4 {
+        return None;
+    }
     let sb = subsector.as_bytes();
-    if !sb[0].is_ascii_uppercase() || !sb[1].is_ascii_uppercase() || sb[2] != b'-' || !sb[3].is_ascii_uppercase() { return None; }
-    if sector_name.is_empty() || !sector_name.as_bytes()[0].is_ascii_uppercase() { return None; }
+    if !sb[0].is_ascii_uppercase()
+        || !sb[1].is_ascii_uppercase()
+        || sb[2] != b'-'
+        || !sb[3].is_ascii_uppercase()
+    {
+        return None;
+    }
+    if sector_name.is_empty() || !sector_name.as_bytes()[0].is_ascii_uppercase() {
+        return None;
+    }
     Some(ProcGenName {
         sector_name: sector_name.to_string(),
-        l1: (sb[0]-b'A') as u32, l2: (sb[1]-b'A') as u32, l3: (sb[3]-b'A') as u32,
-        mass_code, mass_char, n1, n2,
+        l1: (sb[0] - b'A') as u32,
+        l2: (sb[1] - b'A') as u32,
+        l3: (sb[3] - b'A') as u32,
+        mass_code,
+        mass_char,
+        n1,
+        n2,
     })
 }
 
@@ -372,13 +549,13 @@ pub fn estimate_coords(pg: &ProcGenName) -> Option<EstimatedCoords> {
     let cubeside = 10.0 * (1u32 << pg.mass_code) as f64;
     let bid = pg.n1 * 17576 + pg.l3 * 676 + pg.l2 * 26 + pg.l1;
     let column = bid % 128;
-    let stack  = (bid / 128) % 128;
-    let row    = bid / (128 * 128);
+    let stack = (bid / 128) % 128;
+    let row = bid / (128 * 128);
     let half = cubeside / 2.0;
     Some(EstimatedCoords {
         x: BASE_COORDS[0] + sx as f64 * SECTOR_SIZE + column as f64 * cubeside + half,
-        y: BASE_COORDS[1] + sy as f64 * SECTOR_SIZE + stack  as f64 * cubeside + half,
-        z: BASE_COORDS[2] + sz as f64 * SECTOR_SIZE + row    as f64 * cubeside + half,
+        y: BASE_COORDS[1] + sy as f64 * SECTOR_SIZE + stack as f64 * cubeside + half,
+        z: BASE_COORDS[2] + sz as f64 * SECTOR_SIZE + row as f64 * cubeside + half,
         uncertainty_ly: half,
     })
 }
@@ -388,15 +565,18 @@ pub fn sector_coords_from_id64(id64: i64) -> (u32, u32, u32) {
     let mc = id & 7;
     let bpe = 128u64 >> mc;
     let raw_x = ((id >> (30 - mc * 2)) & (0x3FFF >> mc)) as u32;
-    let raw_y = ((id >> (17 - mc))      & (0x1FFF >> mc)) as u32;
-    let raw_z = ((id >> 3)              & (0x3FFF >> mc)) as u32;
+    let raw_y = ((id >> (17 - mc)) & (0x1FFF >> mc)) as u32;
+    let raw_z = ((id >> 3) & (0x3FFF >> mc)) as u32;
     (raw_x / bpe as u32, raw_y / bpe as u32, raw_z / bpe as u32)
 }
 
 /// Resolve a system name or id64 string to (id64, name, x, y, z).
 /// Tries the DB first, then falls back to ProcGen coordinate estimation.
 /// For estimated systems, id64 is set to -1 (synthetic).
-pub fn resolve_system(conn: &rusqlite::Connection, input: &str) -> Result<(i64, String, f64, f64, f64), String> {
+pub fn resolve_system(
+    conn: &rusqlite::Connection,
+    input: &str,
+) -> Result<(i64, String, f64, f64, f64), String> {
     // Try as id64 first
     if let Ok(id) = input.parse::<i64>() {
         if let Ok(row) = conn.query_row(
@@ -404,7 +584,15 @@ pub fn resolve_system(conn: &rusqlite::Connection, input: &str) -> Result<(i64, 
              FROM systems s JOIN systems_index i ON s.id64=i.id \
              WHERE s.id64=? LIMIT 1",
             rusqlite::params![id],
-            |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,f64>(2)?, r.get::<_,f64>(3)?, r.get::<_,f64>(4)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, f64>(4)?,
+                ))
+            },
         ) {
             return Ok(row);
         }
@@ -415,7 +603,15 @@ pub fn resolve_system(conn: &rusqlite::Connection, input: &str) -> Result<(i64, 
          FROM systems s JOIN systems_index i ON s.id64=i.id \
          WHERE s.name=? COLLATE NOCASE LIMIT 1",
         rusqlite::params![input],
-        |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,f64>(2)?, r.get::<_,f64>(3)?, r.get::<_,f64>(4)?)),
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
+            ))
+        },
     ) {
         return Ok(row);
     }
@@ -462,8 +658,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_n1_omitted() {
+        // n1 is dropped along with its hyphen when zero.
+        let pg = parse_procgen_name("Eotchorts YE-Z d237").unwrap();
+        assert_eq!(pg.sector_name, "Eotchorts");
+        assert_eq!(pg.n1, 0);
+        assert_eq!(pg.n2, 237);
+        assert_eq!(pg.mass_code, 3);
+        assert_eq!((pg.l1, pg.l2, pg.l3), (24, 4, 25));
+
+        let pg = parse_procgen_name("Eotchorts AA-Z d419").unwrap();
+        assert_eq!(pg.n1, 0);
+        assert_eq!(pg.n2, 419);
+        assert_eq!((pg.l1, pg.l2, pg.l3), (0, 0, 25));
+    }
+
+    #[test]
+    fn n1_omitted_matches_explicit_zero() {
+        // "d237" and "d0-237" name the same boxel, so they must decode to
+        // identical coordinates.
+        let a = estimate_coords(&parse_procgen_name("Eotchorts YE-Z d237").unwrap()).unwrap();
+        let b = estimate_coords(&parse_procgen_name("Eotchorts YE-Z d0-237").unwrap()).unwrap();
+        assert_eq!((a.x, a.y, a.z), (b.x, b.y, b.z));
+    }
+
+    #[test]
     fn rejects_non_procgen() {
         assert!(parse_procgen_name("Sol").is_none());
         assert!(parse_procgen_name("Colonia").is_none());
+        // Malformed number segments must still fail rather than fall into the
+        // new n1=0 branch.
+        assert!(parse_procgen_name("Eotchorts YE-Z d").is_none());
+        assert!(parse_procgen_name("Eotchorts YE-Z d-").is_none());
+        assert!(parse_procgen_name("Eotchorts YE-Z dx37").is_none());
+        assert!(parse_procgen_name("Eotchorts YE-Z d1-2-3").is_none());
     }
 }

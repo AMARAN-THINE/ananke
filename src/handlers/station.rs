@@ -1,4 +1,8 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Json,
+};
 use std::sync::Arc;
 
 use crate::models::NearestStationQuery;
@@ -8,7 +12,10 @@ pub async fn nearest_station(
     State(state): State<Arc<AppState>>,
     Query(params): Query<NearestStationQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.query_semaphore.acquire().await
+    let _permit = state
+        .query_semaphore
+        .acquire()
+        .await
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
 
     let pool = state.db_pool.clone();

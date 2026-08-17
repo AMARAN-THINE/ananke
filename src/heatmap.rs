@@ -1,12 +1,15 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Response},
 };
 use bytes::Bytes;
 use std::{
-    sync::{Arc, atomic::{AtomicU64, Ordering as AtomicOrdering}},
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -38,11 +41,19 @@ impl Heatmap {
     }
 
     pub fn bump(&self, x: f64, z: f64) {
-        if !x.is_finite() || !z.is_finite() { return; }
-        if x < HEATMAP_X_MIN || x >= HEATMAP_X_MAX { return; }
-        if z < HEATMAP_Z_MIN || z >= HEATMAP_Z_MAX { return; }
-        let gx = ((x - HEATMAP_X_MIN) / (HEATMAP_X_MAX - HEATMAP_X_MIN) * HEATMAP_W as f64) as usize;
-        let gz = ((z - HEATMAP_Z_MIN) / (HEATMAP_Z_MAX - HEATMAP_Z_MIN) * HEATMAP_H as f64) as usize;
+        if !x.is_finite() || !z.is_finite() {
+            return;
+        }
+        if x < HEATMAP_X_MIN || x >= HEATMAP_X_MAX {
+            return;
+        }
+        if z < HEATMAP_Z_MIN || z >= HEATMAP_Z_MAX {
+            return;
+        }
+        let gx =
+            ((x - HEATMAP_X_MIN) / (HEATMAP_X_MAX - HEATMAP_X_MIN) * HEATMAP_W as f64) as usize;
+        let gz =
+            ((z - HEATMAP_Z_MIN) / (HEATMAP_Z_MAX - HEATMAP_Z_MIN) * HEATMAP_H as f64) as usize;
         let idx = gz.min(HEATMAP_H - 1) * HEATMAP_W + gx.min(HEATMAP_W - 1);
         self.cells[idx].fetch_add(1, AtomicOrdering::Relaxed);
         self.total_bumps.fetch_add(1, AtomicOrdering::Relaxed);
@@ -58,7 +69,9 @@ impl Heatmap {
     }
 
     fn render_png(&self) -> Bytes {
-        let snap: Vec<u64> = self.cells.iter()
+        let snap: Vec<u64> = self
+            .cells
+            .iter()
             .map(|c| c.load(AtomicOrdering::Relaxed))
             .collect();
         let max = snap.iter().copied().max().unwrap_or(0);
@@ -66,14 +79,16 @@ impl Heatmap {
 
         let mut rgba = vec![0u8; HEATMAP_W * HEATMAP_H * 4];
         for (i, &count) in snap.iter().enumerate() {
-            if count == 0 { continue; }
+            if count == 0 {
+                continue;
+            }
             let intensity = ((count + 1) as f64).ln() / log_max;
             let (r, g, b, a) = colormap_inferno(intensity);
             let gx = i % HEATMAP_W;
             let gz = i / HEATMAP_W;
             // Flip Y: gz=0 is the south pole in galaxy coords, but row 0 is top of image.
             let pi = ((HEATMAP_H - 1 - gz) * HEATMAP_W + gx) * 4;
-            rgba[pi]     = r;
+            rgba[pi] = r;
             rgba[pi + 1] = g;
             rgba[pi + 2] = b;
             rgba[pi + 3] = a;
@@ -84,7 +99,8 @@ impl Heatmap {
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
-        encoder.write_header()
+        encoder
+            .write_header()
             .expect("png header write")
             .write_image_data(&rgba)
             .expect("png image write");
@@ -115,20 +131,23 @@ impl Heatmap {
 fn colormap_inferno(t: f64) -> (u8, u8, u8, u8) {
     // 9 evenly-spaced samples from the official inferno LUT (perceptually uniform).
     const STOPS: &[[f64; 4]] = &[
-        [0.000,   0.0,   0.0,   4.0],
-        [0.125,  40.0,  11.0,  84.0],
-        [0.250,  96.0,  19.0, 110.0],
-        [0.375, 159.0,  42.0,  99.0],
-        [0.500, 212.0,  72.0,  66.0],
-        [0.625, 245.0, 125.0,  21.0],
-        [0.750, 250.0, 193.0,  39.0],
+        [0.000, 0.0, 0.0, 4.0],
+        [0.125, 40.0, 11.0, 84.0],
+        [0.250, 96.0, 19.0, 110.0],
+        [0.375, 159.0, 42.0, 99.0],
+        [0.500, 212.0, 72.0, 66.0],
+        [0.625, 245.0, 125.0, 21.0],
+        [0.750, 250.0, 193.0, 39.0],
         [0.875, 252.0, 255.0, 164.0],
         [1.000, 252.0, 255.0, 164.0], // sentinel: clamp at top
     ];
 
     let t = t.clamp(0.0, 1.0);
     // Binary-search for the segment containing t.
-    let seg = STOPS.partition_point(|s| s[0] <= t).saturating_sub(1).min(STOPS.len() - 2);
+    let seg = STOPS
+        .partition_point(|s| s[0] <= t)
+        .saturating_sub(1)
+        .min(STOPS.len() - 2);
     let [t0, r0, g0, b0] = STOPS[seg];
     let [t1, r1, g1, b1] = STOPS[seg + 1];
     let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
@@ -147,9 +166,7 @@ pub fn heatmap_decay_thread(heatmap: Arc<Heatmap>) {
     }
 }
 
-pub async fn heatmap_png_handler(
-    State(state): State<Arc<AppState>>,
-) -> Response {
+pub async fn heatmap_png_handler(State(state): State<Arc<AppState>>) -> Response {
     let heatmap = state.heatmap.clone();
     match tokio::task::spawn_blocking(move || heatmap.get_or_render()).await {
         Ok(bytes) => Response::builder()
@@ -171,7 +188,7 @@ pub async fn heatmap_png_handler(
 fn marker_pct(x: f64, z: f64) -> (f64, f64) {
     let left = (x - HEATMAP_X_MIN) / (HEATMAP_X_MAX - HEATMAP_X_MIN) * 100.0;
     // Image row 0 is the *top* of the canvas (high Z), so we invert.
-    let top  = (1.0 - (z - HEATMAP_Z_MIN) / (HEATMAP_Z_MAX - HEATMAP_Z_MIN)) * 100.0;
+    let top = (1.0 - (z - HEATMAP_Z_MIN) / (HEATMAP_Z_MAX - HEATMAP_Z_MIN)) * 100.0;
     (left, top)
 }
 
@@ -183,21 +200,28 @@ pub async fn heatmap_html_handler() -> impl IntoResponse {
 fn build_heatmap_html() -> String {
     // Known landmark coordinates (galactic X, Z).
     let landmarks: &[(&str, f64, f64)] = &[
-        ("Sol",        0.0,         0.0),
-        ("Sgr A*",     25.21,    -20.90),
-        ("Colonia",  -9530.5,   -910.28),
+        ("Sol", 0.0, 0.0),
+        ("Sgr A*", 25.21, -20.90),
+        ("Colonia", -9530.5, -910.28),
         ("Beagle Pt", 1111.56, 65269.15),
     ];
 
-    let markers: String = landmarks.iter().map(|(name, x, z)| {
-        let (l, t) = marker_pct(*x, *z);
-        format!(
-            r#"<div class="marker" style="left:{l:.2}%;top:{t:.2}%">{name}</div>"#,
-            l = l, t = t, name = name
-        )
-    }).collect::<Vec<_>>().join("\n  ");
+    let markers: String = landmarks
+        .iter()
+        .map(|(name, x, z)| {
+            let (l, t) = marker_pct(*x, *z);
+            format!(
+                r#"<div class="marker" style="left:{l:.2}%;top:{t:.2}%">{name}</div>"#,
+                l = l,
+                t = t,
+                name = name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n  ");
 
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -261,5 +285,7 @@ fn build_heatmap_html() -> String {
   setInterval(() => {{ img.src = `/api/heatmap.png?t=${{Date.now()}}`; }}, 30_000);
 </script>
 </body>
-</html>"#, markers = markers)
+</html>"#,
+        markers = markers
+    )
 }

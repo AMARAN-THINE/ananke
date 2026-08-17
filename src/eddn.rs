@@ -2,7 +2,7 @@ use crossbeam_channel::Sender;
 use flate2::read::ZlibDecoder;
 use std::{
     io::Read,
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
@@ -43,32 +43,28 @@ fn loc_str(msg: &serde_json::Value, raw_key: &str, loc_key: &str) -> Option<Stri
 
 fn star_type_to_subtype(t: &str) -> String {
     let mapped = match t {
-        "O"  => "O (Blue-White) Star",
-        "B"  => "B (Blue-White) Star",
-        "A"  => "A (Blue-White) Star",
-        "F"  => "F (White) Star",
-        "G"  => "G (White-Yellow) Star",
-        "K"  => "K (Yellow-Orange) Star",
-        "M"  => "M (Red dwarf) Star",
-        "L"  => "L (Brown dwarf) Star",
-        "T"  => "T (Brown dwarf) Star",
-        "Y"  => "Y (Brown dwarf) Star",
+        "O" => "O (Blue-White) Star",
+        "B" => "B (Blue-White) Star",
+        "A" => "A (Blue-White) Star",
+        "F" => "F (White) Star",
+        "G" => "G (White-Yellow) Star",
+        "K" => "K (Yellow-Orange) Star",
+        "M" => "M (Red dwarf) Star",
+        "L" => "L (Brown dwarf) Star",
+        "T" => "T (Brown dwarf) Star",
+        "Y" => "Y (Brown dwarf) Star",
         "TTS" => "T Tauri Star",
         "AeBe" => "Herbig Ae/Be Star",
         "W" | "WN" | "WNC" | "WC" | "WO" => "Wolf-Rayet Star",
         "CS" | "C" | "CN" | "CJ" | "CH" | "CHd" => "Carbon Star",
         "MS" => "MS-type Star",
-        "S"  => "S-type Star",
-        "N"  => "Neutron Star",
-        "H"  => "Black Hole",
-        "X"  => "Exotic",
+        "S" => "S-type Star",
+        "N" => "Neutron Star",
+        "H" => "Black Hole",
+        "X" => "Exotic",
         "SupermassiveBlackHole" => "Supermassive Black Hole",
-        "D" | "DA" | "DAB" | "DAO" | "DAZ" | "DAV" |
-        "DB" | "DBZ" | "DBV" |
-        "DO" | "DOV" |
-        "DQ" |
-        "DC" | "DCV" |
-        "DX" => "White Dwarf",
+        "D" | "DA" | "DAB" | "DAO" | "DAZ" | "DAV" | "DB" | "DBZ" | "DBV" | "DO" | "DOV" | "DQ"
+        | "DC" | "DCV" | "DX" => "White Dwarf",
         _ => return t.to_string(),
     };
     mapped.to_string()
@@ -89,32 +85,65 @@ fn eddn_jump_to_system(id64: i64, name: String, msg: &serde_json::Value) -> Span
             })
         });
 
-    let allegiance = msg.get("SystemAllegiance").and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let government       = loc_str(msg, "SystemGovernment",     "SystemGovernment_Localised");
-    let primary_economy  = loc_str(msg, "SystemEconomy",        "SystemEconomy_Localised");
-    let secondary_econ   = loc_str(msg, "SystemSecondEconomy",  "SystemSecondEconomy_Localised");
-    let security         = loc_str(msg, "SystemSecurity",       "SystemSecurity_Localised");
-    let population       = msg.get("Population").and_then(|v| v.as_i64());
+    let allegiance = msg
+        .get("SystemAllegiance")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let government = loc_str(msg, "SystemGovernment", "SystemGovernment_Localised");
+    let primary_economy = loc_str(msg, "SystemEconomy", "SystemEconomy_Localised");
+    let secondary_econ = loc_str(msg, "SystemSecondEconomy", "SystemSecondEconomy_Localised");
+    let security = loc_str(msg, "SystemSecurity", "SystemSecurity_Localised");
+    let population = msg.get("Population").and_then(|v| v.as_i64());
     let controlling_faction = msg.get("SystemFaction").cloned().filter(|v| !v.is_null());
     let factions = msg.get("Factions").cloned().filter(|v| !v.is_null());
     let powers = msg.get("Powers").cloned().filter(|v| !v.is_null());
-    let power_state = msg.get("PowerplayState").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let controlling_power = msg.get("ControllingPower").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let p_ctrl   = msg.get("PowerplayStateControlProgress").and_then(|v| v.as_f64());
-    let p_reinf  = msg.get("PowerplayStateReinforcement").and_then(|v| v.as_f64());
-    let p_under  = msg.get("PowerplayStateUndermining").and_then(|v| v.as_f64());
-    let p_conflict = msg.get("PowerplayConflictProgress").cloned().filter(|v| !v.is_null());
+    let power_state = msg
+        .get("PowerplayState")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let controlling_power = msg
+        .get("ControllingPower")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let p_ctrl = msg
+        .get("PowerplayStateControlProgress")
+        .and_then(|v| v.as_f64());
+    let p_reinf = msg
+        .get("PowerplayStateReinforcement")
+        .and_then(|v| v.as_f64());
+    let p_under = msg
+        .get("PowerplayStateUndermining")
+        .and_then(|v| v.as_f64());
+    let p_conflict = msg
+        .get("PowerplayConflictProgress")
+        .cloned()
+        .filter(|v| !v.is_null());
     let thargoid = msg.get("ThargoidWar").cloned().filter(|v| !v.is_null());
-    let date = msg.get("timestamp").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let date = msg
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     SpanshSystem {
-        id64, name, population, coords,
-        bodies: None, stations: None,
-        allegiance, government, primary_economy,
-        secondary_economy: secondary_econ, security,
-        body_count: None, date,
-        controlling_faction, factions, power_state, powers, controlling_power,
+        id64,
+        name,
+        population,
+        coords,
+        bodies: None,
+        stations: None,
+        allegiance,
+        government,
+        primary_economy,
+        secondary_economy: secondary_econ,
+        security,
+        body_count: None,
+        date,
+        controlling_faction,
+        factions,
+        power_state,
+        powers,
+        controlling_power,
         power_state_control_progress: p_ctrl,
         power_state_reinforcement: p_reinf,
         power_state_undermining: p_under,
@@ -125,14 +154,28 @@ fn eddn_jump_to_system(id64: i64, name: String, msg: &serde_json::Value) -> Span
 
 fn eddn_carrier_system(id64: i64, name: String) -> SpanshSystem {
     SpanshSystem {
-        id64, name,
-        population: None, coords: None, bodies: None, stations: None,
-        allegiance: None, government: None, primary_economy: None,
-        secondary_economy: None, security: None, body_count: None,
-        date: None, controlling_faction: None, factions: None,
-        power_state: None, powers: None, controlling_power: None,
-        power_state_control_progress: None, power_state_reinforcement: None,
-        power_state_undermining: None, power_conflict_progress: None,
+        id64,
+        name,
+        population: None,
+        coords: None,
+        bodies: None,
+        stations: None,
+        allegiance: None,
+        government: None,
+        primary_economy: None,
+        secondary_economy: None,
+        security: None,
+        body_count: None,
+        date: None,
+        controlling_faction: None,
+        factions: None,
+        power_state: None,
+        powers: None,
+        controlling_power: None,
+        power_state_control_progress: None,
+        power_state_reinforcement: None,
+        power_state_undermining: None,
+        power_conflict_progress: None,
         thargoid_war: None,
     }
 }
@@ -154,31 +197,31 @@ fn eddn_scan_to_body(scan: &serde_json::Value) -> Option<serde_json::Value> {
             }
         };
         copy("DistanceFromArrivalLS", "distanceToArrival");
-        copy("SurfaceTemperature",    "surfaceTemperature");
-        copy("Eccentricity",          "orbitalEccentricity");
-        copy("OrbitalInclination",    "orbitalInclination");
-        copy("Periapsis",             "argOfPeriapsis");
-        copy("TidalLock",             "rotationalPeriodTidallyLocked");
-        copy("AxialTilt",             "axialTilt");
-        copy("AscendingNode",         "ascendingNode");
-        copy("MeanAnomaly",           "meanAnomaly");
-        copy("WasDiscovered",         "wasDiscovered");
-        copy("WasMapped",             "wasMapped");
-        copy("Volcanism",             "volcanismType");
-        copy("TerraformState",        "terraformingState");
+        copy("SurfaceTemperature", "surfaceTemperature");
+        copy("Eccentricity", "orbitalEccentricity");
+        copy("OrbitalInclination", "orbitalInclination");
+        copy("Periapsis", "argOfPeriapsis");
+        copy("TidalLock", "rotationalPeriodTidallyLocked");
+        copy("AxialTilt", "axialTilt");
+        copy("AscendingNode", "ascendingNode");
+        copy("MeanAnomaly", "meanAnomaly");
+        copy("WasDiscovered", "wasDiscovered");
+        copy("WasMapped", "wasMapped");
+        copy("Volcanism", "volcanismType");
+        copy("TerraformState", "terraformingState");
         copy("AtmosphereComposition", "atmosphereComposition");
-        copy("Composition",           "solidComposition");
-        copy("Materials",             "materials");
-        copy("Rings",                 "rings");
-        copy("Parents",               "parents");
-        copy("StellarMass",           "solarMasses");
-        copy("AbsoluteMagnitude",     "absoluteMagnitude");
-        copy("Age_MY",                "age");
-        copy("Luminosity",            "luminosity");
-        copy("Subclass",              "subclass");
-        copy("ReserveLevel",          "reserveLevel");
-        copy("MassEM",                "earthMasses");
-        copy("Landable",              "isLandable");
+        copy("Composition", "solidComposition");
+        copy("Materials", "materials");
+        copy("Rings", "rings");
+        copy("Parents", "parents");
+        copy("StellarMass", "solarMasses");
+        copy("AbsoluteMagnitude", "absoluteMagnitude");
+        copy("Age_MY", "age");
+        copy("Luminosity", "luminosity");
+        copy("Subclass", "subclass");
+        copy("ReserveLevel", "reserveLevel");
+        copy("MassEM", "earthMasses");
+        copy("Landable", "isLandable");
     } // `copy` dropped here, mutable borrow on `body` released
 
     // Unit conversions: EDDN uses SI, Spansh uses game units
@@ -192,16 +235,27 @@ fn eddn_scan_to_body(scan: &serde_json::Value) -> Option<serde_json::Value> {
     }
     // SemiMajorAxis: metres -> AU
     if let Some(m) = scan.get("SemiMajorAxis").and_then(|v| v.as_f64()) {
-        body.insert("semiMajorAxis".into(), serde_json::json!(m / 149_597_870_700.0));
+        body.insert(
+            "semiMajorAxis".into(),
+            serde_json::json!(m / 149_597_870_700.0),
+        );
     }
     // RotationPeriod: seconds -> days (negative = retrograde, preserved)
     if let Some(s) = scan.get("RotationPeriod").and_then(|v| v.as_f64()) {
         body.insert("rotationalPeriod".into(), serde_json::json!(s / 86400.0));
     }
 
-    if let Some(v) = scan.get("AtmosphereType").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = scan
+        .get("AtmosphereType")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         body.insert("atmosphereType".into(), serde_json::json!(v));
-    } else if let Some(v) = scan.get("Atmosphere").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    } else if let Some(v) = scan
+        .get("Atmosphere")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         body.insert("atmosphereType".into(), serde_json::json!(v));
     }
 
@@ -210,7 +264,10 @@ fn eddn_scan_to_body(scan: &serde_json::Value) -> Option<serde_json::Value> {
         body.insert("subType".into(), serde_json::json!(planet_class));
     } else if let Some(star_type) = scan.get("StarType").and_then(|v| v.as_str()) {
         body.insert("type".into(), serde_json::json!("Star"));
-        body.insert("subType".into(), serde_json::json!(star_type_to_subtype(star_type)));
+        body.insert(
+            "subType".into(),
+            serde_json::json!(star_type_to_subtype(star_type)),
+        );
         body.insert("spectralClass".into(), serde_json::json!(star_type));
         if body_id == 0 {
             body.insert("mainStar".into(), serde_json::json!(true));
@@ -249,7 +306,11 @@ fn eddn_docked_to_station(d: &serde_json::Value) -> Option<serde_json::Value> {
     if let Some(v) = d.get("DistFromStarLS").filter(|v| !v.is_null()) {
         st.insert("distanceToArrival".into(), v.clone());
     }
-    if let Some(v) = d.get("StationAllegiance").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = d
+        .get("StationAllegiance")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         st.insert("allegiance".into(), serde_json::json!(v));
     }
     if let Some(g) = loc_str(d, "StationGovernment", "StationGovernment_Localised") {
@@ -261,10 +322,18 @@ fn eddn_docked_to_station(d: &serde_json::Value) -> Option<serde_json::Value> {
     if let Some(v) = d.get("StationServices").filter(|v| !v.is_null()) {
         st.insert("services".into(), v.clone());
     }
-    if let Some(v) = d.get("StationFaction").and_then(|f| f.get("Name")).and_then(|n| n.as_str()) {
+    if let Some(v) = d
+        .get("StationFaction")
+        .and_then(|f| f.get("Name"))
+        .and_then(|n| n.as_str())
+    {
         st.insert("controllingFaction".into(), serde_json::json!(v));
     }
-    if let Some(v) = d.get("StationFaction").and_then(|f| f.get("FactionState")).and_then(|n| n.as_str()) {
+    if let Some(v) = d
+        .get("StationFaction")
+        .and_then(|f| f.get("FactionState"))
+        .and_then(|n| n.as_str())
+    {
         st.insert("controllingFactionState".into(), serde_json::json!(v));
     }
     if let Some(v) = d.get("LandingPads").filter(|v| !v.is_null()) {
@@ -282,7 +351,10 @@ fn eddn_docked_to_station(d: &serde_json::Value) -> Option<serde_json::Value> {
 
 fn eddn_signals_to_body(s: &serde_json::Value) -> Option<serde_json::Value> {
     let body_id = s.get("BodyID").and_then(|v| v.as_i64())?;
-    let body_name = s.get("BodyName").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let body_name = s
+        .get("BodyName")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let signals = s.get("Signals").cloned().filter(|v| !v.is_null());
     signals.as_ref()?;
 
@@ -328,7 +400,9 @@ fn eddn_handle_journal(msg: &serde_json::Value) -> Option<SpanshSystem> {
     let event = msg.get("event")?.as_str()?;
     let id64 = msg.get("SystemAddress").and_then(|v| v.as_i64())?;
     let name = msg.get("StarSystem").and_then(|v| v.as_str())?.to_string();
-    if name.is_empty() { return None; }
+    if name.is_empty() {
+        return None;
+    }
 
     match event {
         "FSDJump" | "Location" | "CarrierJump" => Some(eddn_jump_to_system(id64, name, msg)),
@@ -390,7 +464,8 @@ pub fn eddn_listener_thread(
             Err(e) => {
                 error!("EDDN: failed to create SUB socket: {}", e);
                 std::thread::sleep(Duration::from_millis(reconnect_delay_ms));
-                reconnect_delay_ms = (reconnect_delay_ms.saturating_mul(2)).min(EDDN_RECONNECT_MAX_MS);
+                reconnect_delay_ms =
+                    (reconnect_delay_ms.saturating_mul(2)).min(EDDN_RECONNECT_MAX_MS);
                 continue;
             }
         };
@@ -458,12 +533,19 @@ pub fn eddn_listener_thread(
                             heatmap.bump(c.x, c.z);
                         }
                         let body_count = sys.bodies.as_ref().map(|b| b.len() as u64).unwrap_or(0);
-                        let station_count = sys.stations.as_ref().map(|s| s.len() as u64).unwrap_or(0);
+                        let station_count =
+                            sys.stations.as_ref().map(|s| s.len() as u64).unwrap_or(0);
                         stats.messages_processed.fetch_add(1, Ordering::Relaxed);
                         stats.systems_emitted.fetch_add(1, Ordering::Relaxed);
-                        stats.bodies_emitted.fetch_add(body_count, Ordering::Relaxed);
-                        stats.stations_emitted.fetch_add(station_count, Ordering::Relaxed);
-                        stats.last_message_time.store(current_time_secs(), Ordering::Relaxed);
+                        stats
+                            .bodies_emitted
+                            .fetch_add(body_count, Ordering::Relaxed);
+                        stats
+                            .stations_emitted
+                            .fetch_add(station_count, Ordering::Relaxed);
+                        stats
+                            .last_message_time
+                            .store(current_time_secs(), Ordering::Relaxed);
                         buffer.push(sys);
                     }
                     None => {}
@@ -478,7 +560,9 @@ pub fn eddn_listener_thread(
                 let batch = std::mem::take(&mut buffer);
                 let n = batch.len();
                 match sender.try_send(batch) {
-                    Ok(()) => { last_flush = Instant::now(); }
+                    Ok(()) => {
+                        last_flush = Instant::now();
+                    }
                     Err(crossbeam_channel::TrySendError::Full(returned)) => {
                         warn!("EDDN: writer queue full, blocking on send ({} systems)", n);
                         if sender.send(returned).is_err() {

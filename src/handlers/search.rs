@@ -1,4 +1,8 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Json,
+};
 use std::sync::Arc;
 
 use crate::models::CubeSearchQuery;
@@ -8,20 +12,72 @@ async fn do_cube_search(
     state: Arc<AppState>,
     params: CubeSearchQuery,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _permit = state.query_semaphore.acquire().await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
+    let _permit = state
+        .query_semaphore
+        .acquire()
+        .await
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".into()))?;
     let pool = state.db_pool.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let conn = pool.get().map_err(|e| e.to_string())?;
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<serde_json::Value, (StatusCode, String)> {
+        let conn = pool
+            .get()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        // Cube centre. Explicit x/y/z are the raw form; a named reference
+        // system overrides them.
         let mut cx = params.x.unwrap_or(0.0);
         let mut cy = params.y.unwrap_or(0.0);
         let mut cz = params.z.unwrap_or(0.0);
 
+        // A named reference that will not resolve is a CLIENT ERROR, not a
+        // silent fall-through to (0,0,0). Swallowing the failure centred every
+        // unresolvable lookup on Sol and returned it as though the search had
+        // worked, so a name-parsing failure surfaced as "why is my Eotchorts
+        // search full of Sol" instead of an error.
         let ref_sys = params.ref_system.or(params.center);
+        let reference: serde_json::Value;
+
         if let Some(sys_name) = &ref_sys {
-            if let Ok((_id, _name, rx, ry, rz)) = crate::procgen::resolve_system(&conn, sys_name) {
-                cx = rx; cy = ry; cz = rz;
+            let sys_name = sys_name.trim();
+            if sys_name.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Reference system was empty.".to_string(),
+                ));
             }
+            match crate::procgen::resolve_system(&conn, sys_name) {
+                Ok((id, name, rx, ry, rz)) => {
+                    cx = rx;
+                    cy = ry;
+                    cz = rz;
+                    reference = serde_json::json!({
+                        "name": name,
+                        "id64": id.to_string(),
+                        "coords": { "x": rx, "y": ry, "z": rz },
+                        "resolvedFrom": sys_name,
+                    });
+                }
+                Err(e) => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("Could not resolve reference system '{}': {}", sys_name, e),
+                    ));
+                }
+            }
+        } else if params.x.is_some() || params.y.is_some() || params.z.is_some() {
+            // Raw-coordinate search: no name to report, but the centre is
+            // still stated explicitly so the caller can verify it.
+            reference = serde_json::json!({
+                "name": serde_json::Value::Null,
+                "coords": { "x": cx, "y": cy, "z": cz },
+            });
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "No cube centre supplied: pass ref_system (or center), or x/y/z.".to_string(),
+            ));
         }
 
         let h = params.size.unwrap_or(20.0).min(500.0) / 2.0;
@@ -246,7 +302,9 @@ async fn do_cube_search(
             }
             sql.push_str(" LIMIT 5000");
 
-            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![&min_x, &max_x, &min_y, &max_y, &min_z, &max_z];
 
             if let Some(ref rp) = ring_param {
@@ -288,14 +346,14 @@ async fn do_cube_search(
                     "inhabited": if pop > 0 { "Yes" } else { "No" },
                     "coords": {"x": x, "y": y, "z": z}
                 }))
-            }).map_err(|e| e.to_string())?;
+            }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             results = rows.filter_map(Result::ok).collect();
         } else {
             let mut stmt = conn.prepare("
                 SELECT s.id64, s.name, s.population, i.minX, i.minY, i.minZ
                 FROM systems_index i JOIN systems s ON i.id = s.id64
                 WHERE i.minX >= ? AND i.maxX <= ? AND i.minY >= ? AND i.maxY <= ? AND i.minZ >= ? AND i.maxZ <= ? LIMIT 5000
-            ").map_err(|e| e.to_string())?;
+            ").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let rows = stmt.query_map(rusqlite::params![min_x, max_x, min_y, max_y, min_z, max_z], |row| {
                 let id64: i64 = row.get(0)?;
                 let sys_name: String = row.get(1)?;
@@ -308,13 +366,20 @@ async fn do_cube_search(
                     "arrivalDistLs": 0, "inhabited": if pop > 0 { "Yes" } else { "No" },
                     "coords": {"x": x, "y": y, "z": z}
                 }))
-            }).map_err(|e| e.to_string())?;
+            }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             results = rows.filter_map(Result::ok).collect();
         }
 
         results.sort_by(|a, b| a["systemDistLy"].as_f64().unwrap().partial_cmp(&b["systemDistLy"].as_f64().unwrap()).unwrap());
-        Ok(serde_json::json!({"cubeSize": h*2.0, "count": results.len(), "results": results}))
-    }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        Ok(serde_json::json!({
+            "cubeSize": h * 2.0,
+            "reference": reference,
+            "count": results.len(),
+            "results": results
+        }))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
 
     Ok(Json(result))
 }

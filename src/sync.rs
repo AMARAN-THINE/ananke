@@ -26,7 +26,10 @@ pub fn download_file(url: &str, target: &str) -> bool {
 
     let mut resp = match client.get(url).send() {
         Ok(r) => r,
-        Err(e) => { error!("Download failed to connect: {}", e); return false; }
+        Err(e) => {
+            error!("Download failed to connect: {}", e);
+            return false;
+        }
     };
 
     if !resp.status().is_success() {
@@ -39,7 +42,10 @@ pub fn download_file(url: &str, target: &str) -> bool {
 
     let mut out = match File::create(tmp) {
         Ok(f) => f,
-        Err(e) => { error!("Failed to create temp file: {}", e); return false; }
+        Err(e) => {
+            error!("Failed to create temp file: {}", e);
+            return false;
+        }
     };
 
     let mut downloaded: u64 = 0;
@@ -51,7 +57,11 @@ pub fn download_file(url: &str, target: &str) -> bool {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                error!("Download read error at {:.1} MB: {}", downloaded as f64 / 1048576.0, e);
+                error!(
+                    "Download read error at {:.1} MB: {}",
+                    downloaded as f64 / 1048576.0,
+                    e
+                );
                 let _ = fs::remove_file(tmp);
                 return false;
             }
@@ -69,7 +79,10 @@ pub fn download_file(url: &str, target: &str) -> bool {
             let dl_mb = downloaded as f64 / 1048576.0;
             if total_bytes > 0 {
                 let pct = (downloaded as f64 / total_bytes as f64) * 100.0;
-                info!("Download progress: {:.1}/{:.1} MB ({:.1}%)", dl_mb, total_mb, pct);
+                info!(
+                    "Download progress: {:.1}/{:.1} MB ({:.1}%)",
+                    dl_mb, total_mb, pct
+                );
             } else {
                 info!("Download progress: {:.1} MB (size unknown)", dl_mb);
             }
@@ -87,7 +100,10 @@ pub fn download_file(url: &str, target: &str) -> bool {
     }
 
     let final_mb = downloaded as f64 / 1048576.0;
-    info!("Download complete: {:.1} MB written to {}", final_mb, target);
+    info!(
+        "Download complete: {:.1} MB written to {}",
+        final_mb, target
+    );
     true
 }
 
@@ -136,7 +152,10 @@ pub fn process_systems_dump(filename: &str) {
                         // fails mid-stream, there is no safe way to skip just this one
                         // and keep going. Surface the failure instead of silently
                         // truncating the rest of the dump.
-                        error!("Spansh deserialize error at record {}: {} — aborting import", self.count, e);
+                        error!(
+                            "Spansh deserialize error at record {}: {} — aborting import",
+                            self.count, e
+                        );
                         return Err(e);
                     }
                 }
@@ -155,13 +174,22 @@ pub fn process_systems_dump(filename: &str) {
             batch: Vec::with_capacity(5000),
             count: 0,
         },
-    ).unwrap_or(0);
+    )
+    .unwrap_or(0);
     drop(sender);
     writer_thread.join().unwrap();
 
     let conn = Connection::open(DB_FILE).unwrap();
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync_time', ?)", params![current_time_secs().to_string()]).unwrap();
-    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('import_complete', 'true')", []).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync_time', ?)",
+        params![current_time_secs().to_string()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('import_complete', 'true')",
+        [],
+    )
+    .unwrap();
     info!("\nImport Finished. {} systems. Database Ready.", count);
 }
 
@@ -270,9 +298,10 @@ pub async fn sync_manager() {
             info!("Starting Spansh galaxy sync...");
             let t_start = Instant::now();
 
-            let dl_success = tokio::task::spawn_blocking(|| {
-                download_file(URL_SYSTEMS_1DAY, FILE_SYSTEMS_1DAY)
-            }).await.unwrap();
+            let dl_success =
+                tokio::task::spawn_blocking(|| download_file(URL_SYSTEMS_1DAY, FILE_SYSTEMS_1DAY))
+                    .await
+                    .unwrap();
 
             if dl_success {
                 tokio::task::spawn_blocking(|| {
@@ -282,11 +311,16 @@ pub async fn sync_manager() {
                     } else {
                         info!("Cleaned up dump file after import.");
                     }
-                }).await.unwrap();
+                })
+                .await
+                .unwrap();
 
                 let elapsed = t_start.elapsed();
-                info!("Full sync cycle completed in {}m {}s.",
-                    elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+                info!(
+                    "Full sync cycle completed in {}m {}s.",
+                    elapsed.as_secs() / 60,
+                    elapsed.as_secs() % 60
+                );
             } else {
                 error!("Sync failed: download unsuccessful. Will retry next cycle.");
             }

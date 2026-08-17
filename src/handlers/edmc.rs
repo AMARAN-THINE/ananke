@@ -1,5 +1,9 @@
-use axum::{extract::State, http::{StatusCode, HeaderMap}, Json};
-use std::sync::{Arc, atomic::Ordering};
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Json,
+};
+use std::sync::{atomic::Ordering, Arc};
 use tracing::{error, info, warn};
 
 use crate::config::*;
@@ -9,10 +13,16 @@ use crate::state::AppState;
 
 fn check_edmc_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     if let Some(ref expected_key) = state.edmc_api_key {
-        let provided = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let provided = headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         if provided != expected_key {
             warn!("EDMC auth failed: provided key does not match");
-            return Err((StatusCode::UNAUTHORIZED, "Invalid or missing X-Api-Key".into()));
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Invalid or missing X-Api-Key".into(),
+            ));
         }
     }
     Ok(())
@@ -34,7 +44,11 @@ pub async fn edmc_journal(
     }
 
     let system: SpanshSystem = serde_json::from_slice(&body).map_err(|e| {
-        let err_msg = format!("JSON parse error: {} — body starts with: {}", e, &body_str[..body_str.len().min(300)]);
+        let err_msg = format!(
+            "JSON parse error: {} — body starts with: {}",
+            e,
+            &body_str[..body_str.len().min(300)]
+        );
         error!("EDMC /journal REJECTED: {}", err_msg);
         (StatusCode::BAD_REQUEST, err_msg)
     })?;
@@ -44,22 +58,39 @@ pub async fn edmc_journal(
     let sys_name = system.name.clone();
     let sys_id64 = system.id64;
 
-    info!("EDMC /journal ACCEPTED: '{}' (id64={}, bodies={}, stations={})", sys_name, sys_id64, body_count, station_count);
+    info!(
+        "EDMC /journal ACCEPTED: '{}' (id64={}, bodies={}, stations={})",
+        sys_name, sys_id64, body_count, station_count
+    );
 
     if let Some(c) = system.coords.as_ref() {
         state.heatmap.bump(c.x, c.z);
     }
 
-    state.edmc_sender.send(vec![system])
-        .map_err(|_| {
-            error!("EDMC /journal: writer channel dead or full!");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Ingest queue full or writer dead".into())
-        })?;
+    state.edmc_sender.send(vec![system]).map_err(|_| {
+        error!("EDMC /journal: writer channel dead or full!");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Ingest queue full or writer dead".into(),
+        )
+    })?;
 
-    state.edmc_stats.systems_ingested.fetch_add(1, Ordering::Relaxed);
-    state.edmc_stats.bodies_ingested.fetch_add(body_count as u64, Ordering::Relaxed);
-    state.edmc_stats.stations_ingested.fetch_add(station_count as u64, Ordering::Relaxed);
-    state.edmc_stats.last_ingest_time.store(current_time_secs(), Ordering::Relaxed);
+    state
+        .edmc_stats
+        .systems_ingested
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .edmc_stats
+        .bodies_ingested
+        .fetch_add(body_count as u64, Ordering::Relaxed);
+    state
+        .edmc_stats
+        .stations_ingested
+        .fetch_add(station_count as u64, Ordering::Relaxed);
+    state
+        .edmc_stats
+        .last_ingest_time
+        .store(current_time_secs(), Ordering::Relaxed);
 
     info!("EDMC /journal: queued '{}' for DB write.", sys_name);
 
@@ -81,19 +112,39 @@ pub async fn edmc_batch(
 
     let body_str = String::from_utf8_lossy(&body);
     let systems: Vec<SpanshSystem> = serde_json::from_slice(&body).map_err(|e| {
-        let err_msg = format!("JSON parse error: {} — body starts with: {}", e, &body_str[..body_str.len().min(300)]);
+        let err_msg = format!(
+            "JSON parse error: {} — body starts with: {}",
+            e,
+            &body_str[..body_str.len().min(300)]
+        );
         error!("EDMC /batch REJECTED: {}", err_msg);
         (StatusCode::BAD_REQUEST, err_msg)
     })?;
 
-    if systems.is_empty() { return Err((StatusCode::BAD_REQUEST, "Empty batch".into())); }
-    if systems.len() > 10000 { return Err((StatusCode::BAD_REQUEST, "Batch too large (max 10000)".into())); }
+    if systems.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Empty batch".into()));
+    }
+    if systems.len() > 10000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Batch too large (max 10000)".into(),
+        ));
+    }
 
     let count = systems.len();
-    let body_total: usize = systems.iter().map(|s| s.bodies.as_ref().map(|b| b.len()).unwrap_or(0)).sum();
-    let station_total: usize = systems.iter().map(|s| s.stations.as_ref().map(|b| b.len()).unwrap_or(0)).sum();
+    let body_total: usize = systems
+        .iter()
+        .map(|s| s.bodies.as_ref().map(|b| b.len()).unwrap_or(0))
+        .sum();
+    let station_total: usize = systems
+        .iter()
+        .map(|s| s.stations.as_ref().map(|b| b.len()).unwrap_or(0))
+        .sum();
 
-    info!("EDMC /batch ACCEPTED: {} systems, {} bodies, {} stations", count, body_total, station_total);
+    info!(
+        "EDMC /batch ACCEPTED: {} systems, {} bodies, {} stations",
+        count, body_total, station_total
+    );
 
     for s in systems.iter() {
         if let Some(c) = s.coords.as_ref() {
@@ -102,14 +153,30 @@ pub async fn edmc_batch(
     }
 
     for chunk in systems.chunks(5000).map(|c| c.to_vec()) {
-        state.edmc_sender.send(chunk)
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Ingest queue full or writer dead".into()))?;
+        state.edmc_sender.send(chunk).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Ingest queue full or writer dead".into(),
+            )
+        })?;
     }
 
-    state.edmc_stats.systems_ingested.fetch_add(count as u64, Ordering::Relaxed);
-    state.edmc_stats.bodies_ingested.fetch_add(body_total as u64, Ordering::Relaxed);
-    state.edmc_stats.stations_ingested.fetch_add(station_total as u64, Ordering::Relaxed);
-    state.edmc_stats.last_ingest_time.store(current_time_secs(), Ordering::Relaxed);
+    state
+        .edmc_stats
+        .systems_ingested
+        .fetch_add(count as u64, Ordering::Relaxed);
+    state
+        .edmc_stats
+        .bodies_ingested
+        .fetch_add(body_total as u64, Ordering::Relaxed);
+    state
+        .edmc_stats
+        .stations_ingested
+        .fetch_add(station_total as u64, Ordering::Relaxed);
+    state
+        .edmc_stats
+        .last_ingest_time
+        .store(current_time_secs(), Ordering::Relaxed);
 
     Ok(Json(serde_json::json!({
         "status": "accepted",
@@ -129,13 +196,28 @@ pub async fn edmc_stats(
 
     let db_stats = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let conn = pool.get().map_err(|e| e.to_string())?;
-        let last_sync: String = conn.query_row("SELECT value FROM meta WHERE key='last_sync_time'", [], |r| r.get(0)).unwrap_or_else(|_| "0".to_string());
-        let import_complete: String = conn.query_row("SELECT value FROM meta WHERE key='import_complete'", [], |r| r.get(0)).unwrap_or_else(|_| "false".to_string());
+        let last_sync: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='last_sync_time'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "0".to_string());
+        let import_complete: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='import_complete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "false".to_string());
         Ok(serde_json::json!({
             "last_spansh_sync": last_sync.parse::<u64>().unwrap_or(0),
             "import_complete": import_complete,
         }))
-    }).await.unwrap().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    })
+    .await
+    .unwrap()
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let last_ingest = stats.last_ingest_time.load(Ordering::Relaxed);
 
