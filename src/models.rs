@@ -137,6 +137,11 @@ pub struct NeutronRouteQuery {
     pub range: f64,
     pub supercharge_type: String,
     pub engine: Option<String>,
+    /// When true, only use neutron stars that are the primary (arrival) star
+    /// or within ~100 Ls of the drop-in point. Avoids routing through systems
+    /// where the neutron is 100k+ Ls away from arrival.
+    #[serde(default)]
+    pub primary_only: bool,
 }
 
 // --- A* node for ship routing ---
@@ -152,14 +157,21 @@ pub struct RouteNode {
 }
 
 impl PartialEq for RouteNode {
-    fn eq(&self, other: &Self) -> bool { self.id64 == other.id64 }
+    fn eq(&self, other: &Self) -> bool {
+        self.id64 == other.id64
+    }
 }
 impl Eq for RouteNode {}
 impl PartialOrd for RouteNode {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for RouteNode {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.f_score.partial_cmp(&self.f_score).unwrap_or(std::cmp::Ordering::Equal)
+        other
+            .f_score
+            .partial_cmp(&self.f_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }

@@ -2,7 +2,7 @@ use crossbeam_channel::Sender;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::handlers::bubble::BubbleCacheEntry;
@@ -28,6 +28,10 @@ pub struct AppState {
     /// build task finishes — handlers must check for None and return 503
     /// rather than block, so the rest of the API stays up during the build.
     pub neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>>,
+    /// Primary-only neutron graph: only systems where the neutron star is
+    /// the arrival star (< 100 Ls). Subset of the full graph — used when
+    /// the player enables "primary stars only" to avoid 100k+ Ls detours.
+    pub primary_neutron_graph: Arc<RwLock<Option<Arc<NeutronGraph>>>>,
 }
 
 #[allow(dead_code)]

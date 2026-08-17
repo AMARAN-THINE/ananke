@@ -15,7 +15,8 @@ pub fn get_i64(v: &serde_json::Value, k: &str) -> Option<i64> {
 }
 
 pub fn get_f64(v: &serde_json::Value, k: &str) -> Option<f64> {
-    v.get(k).and_then(|x| x.as_f64().or_else(|| x.as_i64().map(|i| i as f64)))
+    v.get(k)
+        .and_then(|x| x.as_f64().or_else(|| x.as_i64().map(|i| i as f64)))
 }
 
 pub fn get_str<'a>(v: &'a serde_json::Value, k: &str) -> Option<&'a str> {
@@ -23,11 +24,18 @@ pub fn get_str<'a>(v: &'a serde_json::Value, k: &str) -> Option<&'a str> {
 }
 
 pub fn get_bool(v: &serde_json::Value, k: &str) -> i32 {
-    v.get(k).and_then(|x| x.as_bool()).map(|x| if x { 1 } else { 0 }).unwrap_or(0)
+    v.get(k)
+        .and_then(|x| x.as_bool())
+        .map(|x| if x { 1 } else { 0 })
+        .unwrap_or(0)
 }
 
 pub fn get_bool_opt(v: &serde_json::Value, k: &str) -> Option<i32> {
-    v.get(k).and_then(|x| x.as_bool().map(|b| if b { 1 } else { 0 }).or_else(|| x.as_i64().map(|i| i as i32)))
+    v.get(k).and_then(|x| {
+        x.as_bool()
+            .map(|b| if b { 1 } else { 0 })
+            .or_else(|| x.as_i64().map(|i| i as i32))
+    })
 }
 
 // --- Utility ---
@@ -43,7 +51,8 @@ pub fn current_time_secs() -> u64 {
 
 pub fn setup_db_pool() -> Pool<SqliteConnectionManager> {
     let manager = SqliteConnectionManager::file(DB_FILE).with_init(|c| {
-        c.execute_batch("
+        c.execute_batch(
+            "
             PRAGMA mmap_size = 268435456;
             PRAGMA cache_size = -65536;
             PRAGMA temp_store = MEMORY;
@@ -51,7 +60,8 @@ pub fn setup_db_pool() -> Pool<SqliteConnectionManager> {
             PRAGMA journal_mode = WAL;
             PRAGMA busy_timeout = 60000;
             PRAGMA synchronous = NORMAL;
-        ")
+        ",
+        )
     });
     Pool::builder()
         .max_size(15)
@@ -72,61 +82,154 @@ pub fn init_db(conn: &Connection) -> SqliteResult<()> {
         CREATE TABLE IF NOT EXISTS stations (id INTEGER, marketId INTEGER, systemId64 INTEGER, name TEXT, type TEXT, distanceToArrival REAL, allegiance TEXT, government TEXT, economy TEXT, secondEconomy TEXT, haveMarket INTEGER, haveShipyard INTEGER, haveOutfitting INTEGER, otherServices TEXT, updateTime TEXT, realName TEXT, carrierName TEXT, controllingFaction TEXT, controllingFactionState TEXT, state TEXT, latitude REAL, longitude REAL, landingPads TEXT, carrierDockingAccess TEXT, economies TEXT, market TEXT, shipyard TEXT, outfitting TEXT, PRIMARY KEY (systemId64, id)) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS neutron_systems (systemId64 INTEGER PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS primary_neutron_systems (systemId64 INTEGER PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS prison_systems  (systemId64 INTEGER PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS sector_coords (sector_name TEXT PRIMARY KEY COLLATE NOCASE, sector_x INTEGER NOT NULL, sector_y INTEGER NOT NULL, sector_z INTEGER NOT NULL);
     ")?;
 
-    // Migration: add new columns to existing tables (safe to repeat)
+    // Migration: add new columns to existing tables (safe to repeat).
+    // NOTE: anything that QUERIES these columns must run AFTER this point.
+    // backfill_primary_neutrons() reads bodies.mainStar, which is added here,
+    // so it lives outside init_db and is called from the background graph task.
     let sys_new_cols = [
-        ("allegiance", "TEXT"), ("government", "TEXT"), ("primaryEconomy", "TEXT"),
-        ("secondaryEconomy", "TEXT"), ("security", "TEXT"), ("bodyCount", "INTEGER"),
-        ("date", "TEXT"), ("controllingFaction", "TEXT"), ("factions", "TEXT"),
-        ("powerState", "TEXT"), ("powers", "TEXT"), ("controllingPower", "TEXT"),
-        ("powerStateControlProgress", "REAL"), ("powerStateReinforcement", "REAL"),
-        ("powerStateUndermining", "REAL"), ("powerConflictProgress", "TEXT"),
+        ("allegiance", "TEXT"),
+        ("government", "TEXT"),
+        ("primaryEconomy", "TEXT"),
+        ("secondaryEconomy", "TEXT"),
+        ("security", "TEXT"),
+        ("bodyCount", "INTEGER"),
+        ("date", "TEXT"),
+        ("controllingFaction", "TEXT"),
+        ("factions", "TEXT"),
+        ("powerState", "TEXT"),
+        ("powers", "TEXT"),
+        ("controllingPower", "TEXT"),
+        ("powerStateControlProgress", "REAL"),
+        ("powerStateReinforcement", "REAL"),
+        ("powerStateUndermining", "REAL"),
+        ("powerConflictProgress", "TEXT"),
         ("thargoidWar", "TEXT"),
     ];
     for (col, typ) in &sys_new_cols {
-        let _ = conn.execute(&format!("ALTER TABLE systems ADD COLUMN {} {}", col, typ), []);
+        let _ = conn.execute(
+            &format!("ALTER TABLE systems ADD COLUMN {} {}", col, typ),
+            [],
+        );
     }
 
     let body_new_cols = [
-        ("stellarMass", "REAL"), ("absoluteMagnitude", "REAL"), ("age", "INTEGER"),
-        ("luminosity", "TEXT"), ("subclass", "INTEGER"), ("surfacePressure", "REAL"),
-        ("atmosphereComposition", "TEXT"), ("composition", "TEXT"), ("rings", "TEXT"),
-        ("parents", "TEXT"), ("wasDiscovered", "INTEGER"), ("wasMapped", "INTEGER"),
-        ("ascendingNode", "REAL"), ("meanAnomaly", "REAL"),
+        ("stellarMass", "REAL"),
+        ("absoluteMagnitude", "REAL"),
+        ("age", "INTEGER"),
+        ("luminosity", "TEXT"),
+        ("subclass", "INTEGER"),
+        ("surfacePressure", "REAL"),
+        ("atmosphereComposition", "TEXT"),
+        ("composition", "TEXT"),
+        ("rings", "TEXT"),
+        ("parents", "TEXT"),
+        ("wasDiscovered", "INTEGER"),
+        ("wasMapped", "INTEGER"),
+        ("ascendingNode", "REAL"),
+        ("meanAnomaly", "REAL"),
         ("signals", "TEXT"),
-        ("bodyId64", "INTEGER"), ("mainStar", "INTEGER"), ("spectralClass", "TEXT"),
-        ("solarRadius", "REAL"), ("materials", "TEXT"), ("reserveLevel", "TEXT"),
-        ("belts", "TEXT"), ("updateTime", "TEXT"),
+        ("bodyId64", "INTEGER"),
+        ("mainStar", "INTEGER"),
+        ("spectralClass", "TEXT"),
+        ("solarRadius", "REAL"),
+        ("materials", "TEXT"),
+        ("reserveLevel", "TEXT"),
+        ("belts", "TEXT"),
+        ("updateTime", "TEXT"),
     ];
     for (col, typ) in &body_new_cols {
-        let _ = conn.execute(&format!("ALTER TABLE bodies ADD COLUMN {} {}", col, typ), []);
+        let _ = conn.execute(
+            &format!("ALTER TABLE bodies ADD COLUMN {} {}", col, typ),
+            [],
+        );
     }
 
     let station_new_cols = [
-        ("realName", "TEXT"), ("carrierName", "TEXT"), ("controllingFaction", "TEXT"),
-        ("controllingFactionState", "TEXT"), ("state", "TEXT"),
-        ("latitude", "REAL"), ("longitude", "REAL"), ("landingPads", "TEXT"),
-        ("carrierDockingAccess", "TEXT"), ("economies", "TEXT"),
-        ("market", "TEXT"), ("shipyard", "TEXT"), ("outfitting", "TEXT"),
+        ("realName", "TEXT"),
+        ("carrierName", "TEXT"),
+        ("controllingFaction", "TEXT"),
+        ("controllingFactionState", "TEXT"),
+        ("state", "TEXT"),
+        ("latitude", "REAL"),
+        ("longitude", "REAL"),
+        ("landingPads", "TEXT"),
+        ("carrierDockingAccess", "TEXT"),
+        ("economies", "TEXT"),
+        ("market", "TEXT"),
+        ("shipyard", "TEXT"),
+        ("outfitting", "TEXT"),
     ];
     for (col, typ) in &station_new_cols {
-        let _ = conn.execute(&format!("ALTER TABLE stations ADD COLUMN {} {}", col, typ), []);
+        let _ = conn.execute(
+            &format!("ALTER TABLE stations ADD COLUMN {} {}", col, typ),
+            [],
+        );
     }
     Ok(())
+}
+
+// --- Primary neutron backfill ---
+
+/// One-time backfill of `primary_neutron_systems` from existing body data:
+/// systems where a neutron star is the arrival star or within 100 Ls of it.
+///
+/// MUST be called AFTER `init_db()`, because it references `bodies.mainStar`,
+/// which init_db's migration loop is responsible for adding. On a database
+/// predating that column this query fails with "no such column: mainStar" —
+/// which is exactly why errors are propagated here instead of swallowed.
+///
+/// It is also a full scan of `bodies` (there is no index on subType), so call
+/// it from the background graph-init task, never on the startup path.
+///
+/// Returns the number of rows inserted (0 if the table was already populated).
+pub fn backfill_primary_neutrons(conn: &Connection) -> SqliteResult<usize> {
+    let existing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM primary_neutron_systems",
+        [],
+        |r| r.get(0),
+    )?;
+    if existing > 0 {
+        info!(
+            "primary_neutron_systems already populated ({} rows) — skipping backfill.",
+            existing
+        );
+        return Ok(0);
+    }
+
+    warn!("primary_neutron_systems is empty — backfilling from bodies (full scan, this can take several minutes)...");
+    let t_start = std::time::Instant::now();
+    let filled = conn.execute(
+        "INSERT OR IGNORE INTO primary_neutron_systems (systemId64) \
+         SELECT DISTINCT systemId64 FROM bodies \
+         WHERE subType = 'Neutron Star' \
+           AND (mainStar = 1 OR distanceToArrival < 100.0)",
+        [],
+    )?;
+    info!(
+        "Backfilled {} primary neutron systems in {}ms.",
+        filled,
+        t_start.elapsed().as_millis()
+    );
+    Ok(filled)
 }
 
 // --- DB writer worker ---
 
 pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
     let mut conn = Connection::open(DB_FILE).unwrap();
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         PRAGMA synchronous = OFF;
         PRAGMA journal_mode = WAL;
         PRAGMA busy_timeout = 30000;
-    ").unwrap();
+    ",
+    )
+    .unwrap();
 
     while let Ok(batch) = receiver.recv() {
         let mut attempts = 0u64;
@@ -139,30 +242,73 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                     let mut stmt_idx = tx.prepare_cached("INSERT OR REPLACE INTO systems_index (id, minX, maxX, minY, maxY, minZ, maxZ) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
                     let mut stmt_bodies = tx.prepare_cached("INSERT INTO bodies (systemId64, bodyId, name, type, subType, distanceToArrival, isLandable, gravity, earthMasses, radius, surfaceTemperature, orbitalPeriod, semiMajorAxis, orbitalEccentricity, orbitalInclination, argOfPeriapsis, rotationalPeriod, isTidallyLocked, axisTilt, volcanismType, atmosphereType, terraformingState, stellarMass, absoluteMagnitude, age, luminosity, subclass, surfacePressure, atmosphereComposition, composition, rings, parents, wasDiscovered, wasMapped, ascendingNode, meanAnomaly, signals, bodyId64, mainStar, spectralClass, solarRadius, materials, reserveLevel, belts, updateTime) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(systemId64, bodyId) DO UPDATE SET name = COALESCE(excluded.name, bodies.name), type = COALESCE(excluded.type, bodies.type), subType = COALESCE(excluded.subType, bodies.subType), distanceToArrival = COALESCE(excluded.distanceToArrival, bodies.distanceToArrival), isLandable = COALESCE(excluded.isLandable, bodies.isLandable), gravity = COALESCE(excluded.gravity, bodies.gravity), earthMasses = COALESCE(excluded.earthMasses, bodies.earthMasses), radius = COALESCE(excluded.radius, bodies.radius), surfaceTemperature = COALESCE(excluded.surfaceTemperature, bodies.surfaceTemperature), orbitalPeriod = COALESCE(excluded.orbitalPeriod, bodies.orbitalPeriod), semiMajorAxis = COALESCE(excluded.semiMajorAxis, bodies.semiMajorAxis), orbitalEccentricity = COALESCE(excluded.orbitalEccentricity, bodies.orbitalEccentricity), orbitalInclination = COALESCE(excluded.orbitalInclination, bodies.orbitalInclination), argOfPeriapsis = COALESCE(excluded.argOfPeriapsis, bodies.argOfPeriapsis), rotationalPeriod = COALESCE(excluded.rotationalPeriod, bodies.rotationalPeriod), isTidallyLocked = COALESCE(excluded.isTidallyLocked, bodies.isTidallyLocked), axisTilt = COALESCE(excluded.axisTilt, bodies.axisTilt), volcanismType = COALESCE(excluded.volcanismType, bodies.volcanismType), atmosphereType = COALESCE(excluded.atmosphereType, bodies.atmosphereType), terraformingState = COALESCE(excluded.terraformingState, bodies.terraformingState), stellarMass = COALESCE(excluded.stellarMass, bodies.stellarMass), absoluteMagnitude = COALESCE(excluded.absoluteMagnitude, bodies.absoluteMagnitude), age = COALESCE(excluded.age, bodies.age), luminosity = COALESCE(excluded.luminosity, bodies.luminosity), subclass = COALESCE(excluded.subclass, bodies.subclass), surfacePressure = COALESCE(excluded.surfacePressure, bodies.surfacePressure), atmosphereComposition = COALESCE(excluded.atmosphereComposition, bodies.atmosphereComposition), composition = COALESCE(excluded.composition, bodies.composition), rings = COALESCE(excluded.rings, bodies.rings), parents = COALESCE(excluded.parents, bodies.parents), wasDiscovered = COALESCE(excluded.wasDiscovered, bodies.wasDiscovered), wasMapped = COALESCE(excluded.wasMapped, bodies.wasMapped), ascendingNode = COALESCE(excluded.ascendingNode, bodies.ascendingNode), meanAnomaly = COALESCE(excluded.meanAnomaly, bodies.meanAnomaly), signals = COALESCE(excluded.signals, bodies.signals), bodyId64 = COALESCE(excluded.bodyId64, bodies.bodyId64), mainStar = COALESCE(excluded.mainStar, bodies.mainStar), spectralClass = COALESCE(excluded.spectralClass, bodies.spectralClass), solarRadius = COALESCE(excluded.solarRadius, bodies.solarRadius), materials = COALESCE(excluded.materials, bodies.materials), reserveLevel = COALESCE(excluded.reserveLevel, bodies.reserveLevel), belts = COALESCE(excluded.belts, bodies.belts), updateTime = COALESCE(excluded.updateTime, bodies.updateTime)")?;
                     let mut stmt_stations = tx.prepare_cached("INSERT INTO stations (id, marketId, systemId64, name, type, distanceToArrival, allegiance, government, economy, secondEconomy, haveMarket, haveShipyard, haveOutfitting, otherServices, updateTime, realName, carrierName, controllingFaction, controllingFactionState, state, latitude, longitude, landingPads, carrierDockingAccess, economies, market, shipyard, outfitting) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(systemId64, id) DO UPDATE SET marketId = COALESCE(excluded.marketId, stations.marketId), name = COALESCE(excluded.name, stations.name), type = COALESCE(excluded.type, stations.type), distanceToArrival = COALESCE(excluded.distanceToArrival, stations.distanceToArrival), allegiance = COALESCE(excluded.allegiance, stations.allegiance), government = COALESCE(excluded.government, stations.government), economy = COALESCE(excluded.economy, stations.economy), secondEconomy = COALESCE(excluded.secondEconomy, stations.secondEconomy), haveMarket = MAX(excluded.haveMarket, stations.haveMarket), haveShipyard = MAX(excluded.haveShipyard, stations.haveShipyard), haveOutfitting = MAX(excluded.haveOutfitting, stations.haveOutfitting), otherServices = COALESCE(NULLIF(excluded.otherServices, '[]'), stations.otherServices), updateTime = COALESCE(excluded.updateTime, stations.updateTime), realName = COALESCE(excluded.realName, stations.realName), carrierName = COALESCE(excluded.carrierName, stations.carrierName), controllingFaction = COALESCE(excluded.controllingFaction, stations.controllingFaction), controllingFactionState = COALESCE(excluded.controllingFactionState, stations.controllingFactionState), state = COALESCE(excluded.state, stations.state), latitude = COALESCE(excluded.latitude, stations.latitude), longitude = COALESCE(excluded.longitude, stations.longitude), landingPads = COALESCE(excluded.landingPads, stations.landingPads), carrierDockingAccess = COALESCE(excluded.carrierDockingAccess, stations.carrierDockingAccess), economies = COALESCE(excluded.economies, stations.economies), market = COALESCE(excluded.market, stations.market), shipyard = COALESCE(excluded.shipyard, stations.shipyard), outfitting = COALESCE(excluded.outfitting, stations.outfitting)")?;
-                    let mut stmt_neutron = tx.prepare_cached("INSERT OR IGNORE INTO neutron_systems (systemId64) VALUES (?)")?;
-                    let mut stmt_prison  = tx.prepare_cached("INSERT OR IGNORE INTO prison_systems (systemId64) VALUES (?)")?;
+                    let mut stmt_neutron = tx.prepare_cached(
+                        "INSERT OR IGNORE INTO neutron_systems (systemId64) VALUES (?)",
+                    )?;
+                    let mut stmt_primary_neutron = tx.prepare_cached(
+                        "INSERT OR IGNORE INTO primary_neutron_systems (systemId64) VALUES (?)",
+                    )?;
+                    let mut stmt_prison = tx.prepare_cached(
+                        "INSERT OR IGNORE INTO prison_systems (systemId64) VALUES (?)",
+                    )?;
                     let mut stmt_sector  = tx.prepare_cached("INSERT OR IGNORE INTO sector_coords (sector_name, sector_x, sector_y, sector_z) VALUES (?, ?, ?, ?)")?;
 
                     let now = current_time_secs() as i64;
                     for sys in &batch {
                         let pop = sys.population.unwrap_or(0);
-                        let controlling_faction_json = sys.controlling_faction.as_ref().filter(|v| !v.is_null()).map(|v| v.to_string());
-                        let factions_json = sys.factions.as_ref().filter(|v| !v.is_null()).map(|v| v.to_string());
-                        let powers_json = sys.powers.as_ref().filter(|v| !v.is_null()).map(|v| v.to_string());
-                        let power_conflict_json = sys.power_conflict_progress.as_ref().filter(|v| !v.is_null()).map(|v| v.to_string());
-                        let thargoid_war_json = sys.thargoid_war.as_ref().filter(|v| !v.is_null()).map(|v| v.to_string());
+                        let controlling_faction_json = sys
+                            .controlling_faction
+                            .as_ref()
+                            .filter(|v| !v.is_null())
+                            .map(|v| v.to_string());
+                        let factions_json = sys
+                            .factions
+                            .as_ref()
+                            .filter(|v| !v.is_null())
+                            .map(|v| v.to_string());
+                        let powers_json = sys
+                            .powers
+                            .as_ref()
+                            .filter(|v| !v.is_null())
+                            .map(|v| v.to_string());
+                        let power_conflict_json = sys
+                            .power_conflict_progress
+                            .as_ref()
+                            .filter(|v| !v.is_null())
+                            .map(|v| v.to_string());
+                        let thargoid_war_json = sys
+                            .thargoid_war
+                            .as_ref()
+                            .filter(|v| !v.is_null())
+                            .map(|v| v.to_string());
 
                         stmt_sys.execute(params![
-                            sys.id64, sys.name, pop, now,
-                            sys.allegiance, sys.government, sys.primary_economy, sys.secondary_economy,
-                            sys.security, sys.body_count, sys.date,
-                            controlling_faction_json, factions_json,
-                            sys.power_state, powers_json, sys.controlling_power,
-                            sys.power_state_control_progress, sys.power_state_reinforcement,
-                            sys.power_state_undermining, power_conflict_json, thargoid_war_json
+                            sys.id64,
+                            sys.name,
+                            pop,
+                            now,
+                            sys.allegiance,
+                            sys.government,
+                            sys.primary_economy,
+                            sys.secondary_economy,
+                            sys.security,
+                            sys.body_count,
+                            sys.date,
+                            controlling_faction_json,
+                            factions_json,
+                            sys.power_state,
+                            powers_json,
+                            sys.controlling_power,
+                            sys.power_state_control_progress,
+                            sys.power_state_reinforcement,
+                            sys.power_state_undermining,
+                            power_conflict_json,
+                            thargoid_war_json
                         ])?;
 
-                        if sys.government.as_deref()
+                        if sys
+                            .government
+                            .as_deref()
                             .map(|g| g.to_ascii_lowercase().contains("rison"))
                             .unwrap_or(false)
                         {
@@ -171,7 +317,9 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
 
                         if let Some(pg) = crate::procgen::parse_procgen_name(&sys.name) {
                             let (sx, sy, sz) = crate::procgen::sector_coords_from_id64(sys.id64);
-                            stmt_sector.execute(params![pg.sector_name, sx, sy, sz]).ok();
+                            stmt_sector
+                                .execute(params![pg.sector_name, sx, sy, sz])
+                                .ok();
                         }
 
                         if let Some(c) = &sys.coords {
@@ -182,60 +330,140 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                             for b_raw in bodies {
                                 let b: serde_json::Value = match serde_json::from_str(b_raw.get()) {
                                     Ok(v) => v,
-                                    Err(e) => { warn!("skipping malformed body for system {}: {}", sys.id64, e); continue; }
+                                    Err(e) => {
+                                        warn!(
+                                            "skipping malformed body for system {}: {}",
+                                            sys.id64, e
+                                        );
+                                        continue;
+                                    }
                                 };
                                 let b = &b;
                                 let surface_temp: Option<i64> = get_i64(b, "surfaceTemperature")
-                                    .or_else(|| get_f64(b, "surfaceTemperature").map(|f| f.round() as i64));
-                                let atmo_comp = b.get("atmosphereComposition").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let composition = b.get("solidComposition")
+                                    .or_else(|| {
+                                        get_f64(b, "surfaceTemperature").map(|f| f.round() as i64)
+                                    });
+                                let atmo_comp = b
+                                    .get("atmosphereComposition")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let composition = b
+                                    .get("solidComposition")
                                     .or_else(|| b.get("composition"))
-                                    .filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let rings = b.get("rings").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let parents = b.get("parents").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let signals = b.get("signals").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let stellar_mass = get_f64(b, "solarMasses").or_else(|| get_f64(b, "stellarMass"));
-                                let belts = b.get("belts").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let materials = b.get("materials").filter(|v| !v.is_null()).map(|v| v.to_string());
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let rings = b
+                                    .get("rings")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let parents = b
+                                    .get("parents")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let signals = b
+                                    .get("signals")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let stellar_mass =
+                                    get_f64(b, "solarMasses").or_else(|| get_f64(b, "stellarMass"));
+                                let belts = b
+                                    .get("belts")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let materials = b
+                                    .get("materials")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
 
-                                stmt_bodies.execute(params![
-                                    sys.id64, get_i64(b, "bodyId"), get_str(b, "name"), get_str(b, "type"), get_str(b, "subType"),
-                                    get_f64(b, "distanceToArrival"), get_bool(b, "isLandable"), get_f64(b, "gravity"), get_f64(b, "earthMasses"),
-                                    get_f64(b, "radius"), surface_temp, get_f64(b, "orbitalPeriod"), get_f64(b, "semiMajorAxis"),
-                                    get_f64(b, "orbitalEccentricity"), get_f64(b, "orbitalInclination"), get_f64(b, "argOfPeriapsis"), get_f64(b, "rotationalPeriod"),
-                                    get_bool(b, "rotationalPeriodTidallyLocked"), get_f64(b, "axialTilt"), get_str(b, "volcanismType"), get_str(b, "atmosphereType"),
-                                    get_str(b, "terraformingState"),
-                                    stellar_mass, get_f64(b, "absoluteMagnitude"), get_i64(b, "age"),
-                                    get_str(b, "luminosity"), get_i64(b, "subclass"), get_f64(b, "surfacePressure"),
-                                    atmo_comp, composition, rings, parents,
-                                    get_i64(b, "wasDiscovered").or_else(|| get_bool_opt(b, "wasDiscovered").map(|v| v as i64)),
-                                    get_i64(b, "wasMapped").or_else(|| get_bool_opt(b, "wasMapped").map(|v| v as i64)),
-                                    get_f64(b, "ascendingNode"), get_f64(b, "meanAnomaly"),
-                                    signals,
-                                    get_i64(b, "id64"),
-                                    get_bool_opt(b, "mainStar").map(|v| v as i64),
-                                    get_str(b, "spectralClass"),
-                                    get_f64(b, "solarRadius"),
-                                    materials,
-                                    get_str(b, "reserveLevel"),
-                                    belts,
-                                    get_str(b, "updateTime")
-                                ]).ok();
+                                stmt_bodies
+                                    .execute(params![
+                                        sys.id64,
+                                        get_i64(b, "bodyId"),
+                                        get_str(b, "name"),
+                                        get_str(b, "type"),
+                                        get_str(b, "subType"),
+                                        get_f64(b, "distanceToArrival"),
+                                        get_bool(b, "isLandable"),
+                                        get_f64(b, "gravity"),
+                                        get_f64(b, "earthMasses"),
+                                        get_f64(b, "radius"),
+                                        surface_temp,
+                                        get_f64(b, "orbitalPeriod"),
+                                        get_f64(b, "semiMajorAxis"),
+                                        get_f64(b, "orbitalEccentricity"),
+                                        get_f64(b, "orbitalInclination"),
+                                        get_f64(b, "argOfPeriapsis"),
+                                        get_f64(b, "rotationalPeriod"),
+                                        get_bool(b, "rotationalPeriodTidallyLocked"),
+                                        get_f64(b, "axialTilt"),
+                                        get_str(b, "volcanismType"),
+                                        get_str(b, "atmosphereType"),
+                                        get_str(b, "terraformingState"),
+                                        stellar_mass,
+                                        get_f64(b, "absoluteMagnitude"),
+                                        get_i64(b, "age"),
+                                        get_str(b, "luminosity"),
+                                        get_i64(b, "subclass"),
+                                        get_f64(b, "surfacePressure"),
+                                        atmo_comp,
+                                        composition,
+                                        rings,
+                                        parents,
+                                        get_i64(b, "wasDiscovered").or_else(|| get_bool_opt(
+                                            b,
+                                            "wasDiscovered"
+                                        )
+                                        .map(|v| v as i64)),
+                                        get_i64(b, "wasMapped").or_else(|| get_bool_opt(
+                                            b,
+                                            "wasMapped"
+                                        )
+                                        .map(|v| v as i64)),
+                                        get_f64(b, "ascendingNode"),
+                                        get_f64(b, "meanAnomaly"),
+                                        signals,
+                                        get_i64(b, "id64"),
+                                        get_bool_opt(b, "mainStar").map(|v| v as i64),
+                                        get_str(b, "spectralClass"),
+                                        get_f64(b, "solarRadius"),
+                                        materials,
+                                        get_str(b, "reserveLevel"),
+                                        belts,
+                                        get_str(b, "updateTime")
+                                    ])
+                                    .ok();
                                 if get_str(b, "subType") == Some("Neutron Star") {
                                     stmt_neutron.execute(params![sys.id64]).ok();
+                                    // Also track primary neutrons: arrival star or very close
+                                    let is_main = get_bool_opt(b, "mainStar")
+                                        .map(|v| v == 1)
+                                        .unwrap_or(false);
+                                    let dist = get_f64(b, "distanceToArrival").unwrap_or(f64::MAX);
+                                    if is_main || dist < 100.0 {
+                                        stmt_primary_neutron.execute(params![sys.id64]).ok();
+                                    }
                                 }
                             }
                         }
 
                         if let Some(stations) = &sys.stations {
                             for st_raw in stations {
-                                let st: serde_json::Value = match serde_json::from_str(st_raw.get()) {
+                                let st: serde_json::Value = match serde_json::from_str(st_raw.get())
+                                {
                                     Ok(v) => v,
-                                    Err(e) => { warn!("skipping malformed station for system {}: {}", sys.id64, e); continue; }
+                                    Err(e) => {
+                                        warn!(
+                                            "skipping malformed station for system {}: {}",
+                                            sys.id64, e
+                                        );
+                                        continue;
+                                    }
                                 };
                                 let st = &st;
                                 let svcs = st.get("services").and_then(|s| s.as_array());
-                                let mut has_market = 0; let mut has_shipyard = 0; let mut has_outfitting = 0;
+                                let mut has_market = 0;
+                                let mut has_shipyard = 0;
+                                let mut has_outfitting = 0;
                                 let mut other_svcs = Vec::new();
 
                                 if let Some(arr) = svcs {
@@ -245,40 +473,70 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                                                 "Market" => has_market = 1,
                                                 "Shipyard" => has_shipyard = 1,
                                                 "Outfitting" => has_outfitting = 1,
-                                                "Dock" | "Autodock" => {},
+                                                "Dock" | "Autodock" => {}
                                                 _ => other_svcs.push(s),
                                             }
                                         }
                                     }
                                 }
-                                let other_svcs_json = serde_json::to_string(&other_svcs).unwrap_or_else(|_| "[]".to_string());
+                                let other_svcs_json = serde_json::to_string(&other_svcs)
+                                    .unwrap_or_else(|_| "[]".to_string());
 
-                                let landing_pads = st.get("landingPads").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let economies = st.get("economies").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let market = st.get("market").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let shipyard = st.get("shipyard").filter(|v| !v.is_null()).map(|v| v.to_string());
-                                let outfitting = st.get("outfitting").filter(|v| !v.is_null()).map(|v| v.to_string());
+                                let landing_pads = st
+                                    .get("landingPads")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let economies = st
+                                    .get("economies")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let market = st
+                                    .get("market")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let shipyard = st
+                                    .get("shipyard")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
+                                let outfitting = st
+                                    .get("outfitting")
+                                    .filter(|v| !v.is_null())
+                                    .map(|v| v.to_string());
                                 let ctrl_faction = get_str(st, "controllingFaction");
                                 let ctrl_faction_state = get_str(st, "controllingFactionState");
 
-                                stmt_stations.execute(params![
-                                    get_i64(st, "id"), get_i64(st, "marketId"), sys.id64, get_str(st, "name"), get_str(st, "type"), get_f64(st, "distanceToArrival"),
-                                    get_str(st, "allegiance"), get_str(st, "government"), get_str(st, "primaryEconomy"), get_str(st, "secondaryEconomy"),
-                                    has_market, has_shipyard, has_outfitting, other_svcs_json, get_str(st, "updateTime"),
-                                    get_str(st, "realName"),
-                                    get_str(st, "carrierName"),
-                                    ctrl_faction,
-                                    ctrl_faction_state,
-                                    get_str(st, "state"),
-                                    get_f64(st, "latitude"),
-                                    get_f64(st, "longitude"),
-                                    landing_pads,
-                                    get_str(st, "carrierDockingAccess"),
-                                    economies,
-                                    market,
-                                    shipyard,
-                                    outfitting
-                                ]).ok();
+                                stmt_stations
+                                    .execute(params![
+                                        get_i64(st, "id"),
+                                        get_i64(st, "marketId"),
+                                        sys.id64,
+                                        get_str(st, "name"),
+                                        get_str(st, "type"),
+                                        get_f64(st, "distanceToArrival"),
+                                        get_str(st, "allegiance"),
+                                        get_str(st, "government"),
+                                        get_str(st, "primaryEconomy"),
+                                        get_str(st, "secondaryEconomy"),
+                                        has_market,
+                                        has_shipyard,
+                                        has_outfitting,
+                                        other_svcs_json,
+                                        get_str(st, "updateTime"),
+                                        get_str(st, "realName"),
+                                        get_str(st, "carrierName"),
+                                        ctrl_faction,
+                                        ctrl_faction_state,
+                                        get_str(st, "state"),
+                                        get_f64(st, "latitude"),
+                                        get_f64(st, "longitude"),
+                                        landing_pads,
+                                        get_str(st, "carrierDockingAccess"),
+                                        economies,
+                                        market,
+                                        shipyard,
+                                        outfitting
+                                    ])
+                                    .ok();
 
                                 if get_str(st, "government")
                                     .map(|g| g.to_ascii_lowercase().contains("rison"))
@@ -301,7 +559,10 @@ pub fn db_writer_worker(receiver: Receiver<Vec<SpanshSystem>>) {
                         error!("DB Writer: batch failed after {} attempts: {}", attempts, e);
                         break;
                     }
-                    warn!("DB Writer: transaction failed (attempt {}), retrying: {}", attempts, e);
+                    warn!(
+                        "DB Writer: transaction failed (attempt {}), retrying: {}",
+                        attempts, e
+                    );
                     std::thread::sleep(Duration::from_millis(500 * attempts));
                 }
             }
